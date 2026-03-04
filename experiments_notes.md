@@ -135,5 +135,6 @@ Si seguís esta estructura de métodos separados, al hacer merge, Git sabrá que
 
 ## Comparision of results
 
-||  Approach    |   Jakkard Index   |   max-time    |   max-time-video  ||
-||  Baseline    |   0.503531        |   0.094816    |   Basketball      ||
+||  Approach                            |   Jakkard Index   |   max-time    |   max-time-video  ||
+||  Baseline                            |   0.503531        |   0.094816    |   Bolt      ||
+||  Random_noise no linear velocity     |   0.366957        |   0.092872    |   Bolt      ||

@@ -81,7 +81,7 @@ class particle_filter:
         xdynamic=np.zeros((4,))         # velocity_x, velocity_y, velocity_width, velocity_height
 
         # State-transition matrix
-        if cfg.motion_model == 'random_walk':
+        if cfg.motion_model == 'random_noise':
             self.x_init = xstatic           # 4 dimensions
             self.A=np.eye(4)
         else: # constant velocity
@@ -110,7 +110,10 @@ class particle_filter:
 
         #Vector with standard deviations of additive gaussian noise
         #Each dimension corresponds with one element in the state
-        self.Sigma=np.array(cfg.std_noise).transpose(); 
+        if cfg.motion_model == 'random_noise':
+            self.Sigma = np.array(cfg.std_noise_4D)
+        else:
+            self.Sigma = np.array(cfg.std_noise_8D)
         #Make sigma of static variables proportional to bounding box size
         self.Sigma[:2]=self.Sigma[:2]*np.min(self.bbox[2:4]);
         self.Sigma[2:4]=self.Sigma[2:4]*self.bbox[2:4];
@@ -133,8 +136,17 @@ class particle_filter:
         x_past = self.x[idx_particles, :]
         
         #####STEP 2: UPDATE THE PARTICLE STATE#######
-        # Generate noise matrices
-        noise_all = self.Sigma * npr.randn(self.N, P)
+        assert self.Sigma.shape[0] == P
+        if cfg.motion_model == 'random_noise':  # Dinamic noise with Neff
+            Neff = 1.0 / np.sum(self.w**2)
+            Neff /= self.N  # Normalization
+
+            scale = 1 + cfg.noise_beta * Neff
+            dinamic_noise = self.Sigma * scale
+
+            noise_all = npr.randn(self.N, P) * dinamic_noise
+        else:                                   # Static noise matrices
+            noise_all = npr.randn(self.N, P) * self.Sigma
         # Compute the new state updating the previous one
         x_new = (self.A @ x_past.T).T + noise_all
         
