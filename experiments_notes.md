@@ -70,6 +70,7 @@ Para evitar conflictos de merge, os sugiero dividir el archivo `particle_filter.
 * **Archivos principales:** `particle_filter.py` (método `update` parte del bucle `for`, y funciones auxiliares), `config.py`.
 * **Tareas:**
 * **Modelo de Referencia Dinámico:** Al final del `update`, recalcular el histograma de la mejor partícula y mezclarlo con `self.hist_ref`.
+* **Dividir histograma en cuadrantes 2x2 + concatenar**: Esto a Elena le va bien (^-^)
 * **Histogramas Espaciales (Opcional pero recomendado):** Modificar `computeMultiChannelHistogram` o crear una nueva función que concatene histogramas de la mitad superior e inferior de la caja.
 
 
@@ -127,7 +128,12 @@ class particle_filter:
 ### Resumen de Ramas de Git
 
 * **`main`:** Código base funcional.
-* **`feature/motion-model`:** Persona A. Cambios en `__init__` (matriz A) y cálculo de `x_new` y ruido.
+* **`motion_model`:** Persona A. implementacion de modelos de movimiento distintos.
 * **`feature/observation-model`:** Persona B. Cambios en cálculo de histogramas, `self.w` y actualización de `self.hist_ref`.
 
 Si seguís esta estructura de métodos separados, al hacer merge, Git sabrá que uno ha añadido funciones arriba y otro abajo, y el conflicto en `update()` será mínimo (solo las llamadas a las funciones).
+
+## Comparision of results
+
+||  Approach    |   Jakkard Index   |   max-time    |   max-time-video  ||
+||  Baseline    |   0.503531        |   0.094816    |   Basketball      ||

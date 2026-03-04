@@ -71,14 +71,24 @@ class particle_filter:
         self.alpha = cfg.alpha #exponent to increase the sharpness of the particle weight distribution
         
         
-        #Set the initial state X_init=[bb_center_x bb_center_y bb_width  bb_height velocity_x velocity_y velocity_width velocity_height]
-        xstatic=np.array([bbox[0]+0.5*bbox[2], bbox[1]+0.5*bbox[3], bbox[2], bbox[3]])
-        xdynamic=np.zeros((4,))
-        self.x_init = np.concatenate((xstatic, xdynamic),axis=0)
+        #Set the initial state X_init=[xstatic,_xdynamic]
+        xstatic=np.array(
+            [bbox[0]+0.5*bbox[2],       # bb_center_x
+             bbox[1]+0.5*bbox[3],       # bb_center_y
+             bbox[2],                   # bb_width
+             bbox[3],                   # bb_height
+             ])
+        xdynamic=np.zeros((4,))         # velocity_x, velocity_y, velocity_width, velocity_height
 
-        #State-transition matrix: constant velocity model
-        #A=[np.eye(4) t*eye(4); zeros(4) eye(4)];   
-        self.A=np.block([[np.eye(4), self.t*np.eye(4)],[np.zeros((4,4)), np.eye(4)]]);   
+        # State-transition matrix
+        if cfg.motion_model == 'random_walk':
+            self.x_init = xstatic           # 4 dimensions
+            self.A=np.eye(4)
+        else: # constant velocity
+            self.x_init = np.concatenate((xstatic, xdynamic),axis=0)    # 8D
+            self.A=np.block(
+                [[np.eye(4), self.t*np.eye(4)],
+                 [np.zeros((4,4)), np.eye(4)]]);   
                     
         #We obtain the visual representation of the original object
         self.bbox = np.round(bbox)
