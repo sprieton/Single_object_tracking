@@ -133,7 +133,8 @@ class particle_filter:
         x_past = self.x[idx_particles, :]
         
         #####STEP 2: UPDATE THE PARTICLE STATE#######
-        x_new = self.particle_update_(x_past, P)
+        im_hsv = rgb2hsv(im)[:, :, :2]
+        x_new = self.particle_update_(x_past, P, im_hsv)
         
         ##### STEP 3: EXTRACT THE CANDIDATE AREA ########
         im_hsv = rgb2hsv(im)[:, :, :2]
@@ -186,29 +187,59 @@ class particle_filter:
         
         self.bbox = np.array([x_global[0]-0.5*x_global[2], x_global[1]-0.5*x_global[3], x_global[2], x_global[3]])
 
-    def particle_update_(self, x_past, P):
-
-        # Dinamic noise with Neff
-        Neff = 1.0 / np.sum(self.w**2)
-        Neff /= self.N
-
-        # Neff_threshold = 0.5
-        # print(
-        #     f"Neff {Neff:.3f} | "
-        #     f"maxW {np.max(self.w):.3f} | "
-        #     f"stdW {np.std(self.w):.3f} | "
-        #     f"vel ({x_past[:,4].mean():.2f},{x_past[:,5].mean():.2f})",
-        #     end="\t"
-        # )
-
-        dinamic_noise = self.Sigma.copy()
-        if Neff < cfg.Neff_th:
-            scale = 1 + cfg.noise_beta * (1 - Neff)
-            dinamic_noise *= scale
-
-        noise_all = npr.randn(self.N, P) * dinamic_noise
-
-        # Compute the new state updating the previous one
+    def particle_update_(self, x_past, P, im_hsv):
+        """
+        Actualiza las partículas usando Resample-Move con MCMC.
+        x_past: partículas remuestreadas (NxP)
+        P: número de dimensiones del estado
+        im_hsv: imagen en HSV para evaluar la probabilidad
+        """
+        N = x_past.shape[0]
+        
+        # 1️⃣ Propagación con ruido de movimiento clásico
+        noise_all = npr.randn(N, P) * self.Sigma
         x_new = (self.A @ x_past.T).T + noise_all
-
+        
+        # 2️⃣ MCMC move: ajustar cada partícula localmente
+        for i in range(N):
+            # Propuesta: mover la partícula actual con ruido pequeño
+            proposal = x_new[i] + npr.randn(P) * 0.1 * self.Sigma  # 0.1: paso de MCMC
+            
+            # Limitar dentro de la imagen
+            proposal[0] = np.clip(proposal[0], 0, im_hsv.shape[1])
+            proposal[1] = np.clip(proposal[1], 0, im_hsv.shape[0])
+            proposal[2:4] = np.clip(proposal[2:4], 1, np.min(np.array(im_hsv.shape[0:2])))
+            
+            # Extraer región candidata
+            limy = np.array([np.ceil(proposal[1]-0.5*proposal[3]), np.floor(proposal[1]+0.5*proposal[3])], dtype=int)
+            limx = np.array([np.ceil(proposal[0]-0.5*proposal[2]), np.floor(proposal[0]+0.5*proposal[2])], dtype=int)
+            limy = np.clip(limy, 0, im_hsv.shape[0])
+            limx = np.clip(limx, 0, im_hsv.shape[1])
+            candidate = im_hsv[limy[0]:limy[1], limx[0]:limx[1], :]
+            
+            # Calcular similitud de histogramas (probabilidad)
+            if candidate.size == 0:
+                p_proposal = 0.0
+            else:
+                hist = computeMultiChannelHistogram(candidate, self.K)
+                p_proposal = (np.sqrt(self.hist_ref * hist)).sum() ** self.alpha
+            
+            # Peso actual de la partícula
+            limy_old = np.array([np.ceil(x_new[i,1]-0.5*x_new[i,3]), np.floor(x_new[i,1]+0.5*x_new[i,3])], dtype=int)
+            limx_old = np.array([np.ceil(x_new[i,0]-0.5*x_new[i,2]), np.floor(x_new[i,0]+0.5*x_new[i,2])], dtype=int)
+            limy_old = np.clip(limy_old, 0, im_hsv.shape[0])
+            limx_old = np.clip(limx_old, 0, im_hsv.shape[1])
+            candidate_old = im_hsv[limy_old[0]:limy_old[1], limx_old[0]:limx_old[1], :]
+            if candidate_old.size == 0:
+                p_current = 0.0
+            else:
+                hist_old = computeMultiChannelHistogram(candidate_old, self.K)
+                p_current = (np.sqrt(self.hist_ref * hist_old)).sum() ** self.alpha
+            
+            # 3️⃣ Criterio de aceptación Metropolis-Hastings
+            accept_ratio = min(1.0, p_proposal / (p_current + 1e-10))
+            if npr.rand() < accept_ratio:
+                x_new[i] = proposal  # Aceptar la propuesta
+            # Si no, mantener x_new[i] como estaba
+        
         return x_new

@@ -138,4 +138,5 @@ Si seguís esta estructura de métodos separados, al hacer merge, Git sabrá que
 ||  Approach                            |   Jakkard Index   |   max-time    |   max-time-video  ||
 ||  Baseline                            |   0.503531        |   0.094816    |   Bolt      ||
 ||  Random_noise no linear velocity     |   0.366957        |   0.092872    |   Bolt      ||
-||  Linear vel add noise when Neff      |   0.498556        |   0.309177    |   Skating      ||
+||  Linear vel add noise when Neff      |   0.517449        |   0.279883    |   Skating      ||
+||  Linear with MCMC update             |   0.499935        |   0.196953    |   Basketball      ||
