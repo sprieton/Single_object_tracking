@@ -81,12 +81,8 @@ class particle_filter:
         xdynamic=np.zeros((4,))         # velocity_x, velocity_y, velocity_width, velocity_height
 
         # State-transition matrix
-        if cfg.motion_model == 'random_noise':
-            self.x_init = xstatic           # 4 dimensions
-            self.A=np.eye(4)
-        else: # constant velocity
-            self.x_init = np.concatenate((xstatic, xdynamic),axis=0)    # 8D
-            self.A=np.block(
+        self.x_init = np.concatenate((xstatic, xdynamic),axis=0)    # 8D
+        self.A=np.block(
                 [[np.eye(4), self.t*np.eye(4)],
                  [np.zeros((4,4)), np.eye(4)]]);   
                     
@@ -110,10 +106,7 @@ class particle_filter:
 
         #Vector with standard deviations of additive gaussian noise
         #Each dimension corresponds with one element in the state
-        if cfg.motion_model == 'random_noise':
-            self.Sigma = np.array(cfg.std_noise_4D)
-        else:
-            self.Sigma = np.array(cfg.std_noise_8D)
+        self.Sigma = np.array(cfg.std_noise)
         #Make sigma of static variables proportional to bounding box size
         self.Sigma[:2]=self.Sigma[:2]*np.min(self.bbox[2:4]);
         self.Sigma[2:4]=self.Sigma[2:4]*self.bbox[2:4];
@@ -132,24 +125,15 @@ class particle_filter:
         vals = npr.rand(self.N)
         #Choose particle indexes with a value large than vals
         idx_particles = np.searchsorted(self.c, vals)
+
+        # u0 = npr.rand() / self.N
+        # u = u0 + np.arange(self.N) / self.N
+        # idx_particles = np.searchsorted(self.c, u)
         # Get particle states
         x_past = self.x[idx_particles, :]
         
         #####STEP 2: UPDATE THE PARTICLE STATE#######
-        assert self.Sigma.shape[0] == P
-        if cfg.motion_model == 'random_noise':  # Dinamic noise with Neff
-            Neff = 1.0 / np.sum(self.w**2)
-            Neff /= self.N  # Normalization
-
-            scale = 1 + cfg.noise_beta * Neff
-            dinamic_noise = self.Sigma * scale
-
-            noise_all = npr.randn(self.N, P) * dinamic_noise
-        else:                                   # Static noise matrices
-            noise_all = npr.randn(self.N, P) * self.Sigma
-        # Compute the new state updating the previous one
-        x_new = (self.A @ x_past.T).T + noise_all
-        
+        x_new = self.particle_update_(x_past, P)
         
         ##### STEP 3: EXTRACT THE CANDIDATE AREA ########
         im_hsv = rgb2hsv(im)[:, :, :2]
@@ -201,3 +185,30 @@ class particle_filter:
             x_global = self.x[idx_particle, ...]
         
         self.bbox = np.array([x_global[0]-0.5*x_global[2], x_global[1]-0.5*x_global[3], x_global[2], x_global[3]])
+
+    def particle_update_(self, x_past, P):
+
+        # Dinamic noise with Neff
+        Neff = 1.0 / np.sum(self.w**2)
+        Neff /= self.N
+
+        # Neff_threshold = 0.5
+        # print(
+        #     f"Neff {Neff:.3f} | "
+        #     f"maxW {np.max(self.w):.3f} | "
+        #     f"stdW {np.std(self.w):.3f} | "
+        #     f"vel ({x_past[:,4].mean():.2f},{x_past[:,5].mean():.2f})",
+        #     end="\t"
+        # )
+
+        dinamic_noise = self.Sigma.copy()
+        if Neff < cfg.Neff_th:
+            scale = 1 + cfg.noise_beta * (1 - Neff)
+            dinamic_noise *= scale
+
+        noise_all = npr.randn(self.N, P) * dinamic_noise
+
+        # Compute the new state updating the previous one
+        x_new = (self.A @ x_past.T).T + noise_all
+
+        return x_new
