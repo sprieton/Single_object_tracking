@@ -18,6 +18,9 @@ Esto define cómo se mueven las partículas de un frame a otro. Actualmente, usa
 
 * **Random Walk (Posición Constante):** Asumir que la velocidad es 0 y el objeto se mueve aleatoriamente por el ruido. A veces funciona mejor si el objeto cambia de dirección muy bruscamente (como en el video de *Basketball*).
 * **Aceleración:** Incluir aceleración en el estado (vector de 12 dimensiones).
+* **Reinicio de partículas perdidas:**  
+  Cuando el tracker se pierde (Neff bajo), se puede dispersar un porcentaje de partículas alrededor de la última posición conocida o incluso por toda la imagen con distribución gaussiana. Esto permite que algunas partículas “exploren” zonas lejanas donde podría estar el objeto.  
+  > **Nota:** Solo con reinicio aleatorio las partículas no se centran correctamente, y el tracker puede tardar en volver a encontrar el objeto si el modelo de observación no discrimina bien. Mejorar el modelo de observación aumenta mucho la efectividad de esta técnica.
 
 ### 3. Noise $\rightarrow$ Adaptive Noise
 
@@ -25,7 +28,7 @@ Actualmente, el ruido (`self.Sigma`) es fijo en `config.py`.
 
 **Qué probar:**
 
-* Si el tracker está "perdido" (el peso máximo de las partículas es bajo), **aumentar el ruido** para que las partículas se dispersen y busquen en un área más grande.
+* Si el tracker está "perdido" (Neff bajo), **aumentar el ruido** para que las partículas se dispersen y busquen en un área más grande.
 * Si el tracker está "seguro" (peso alto), **reducir el ruido** para concentrarse y ser más preciso.
 * Ajustar el ruido proporcionalmente a la velocidad del objeto (si se mueve rápido, mayor incertidumbre).
 
@@ -38,105 +41,26 @@ Actualmente, `self.hist_ref` se calcula en el frame 1 y nunca cambia.
 * **Actualización lineal:** 
 $$H_{ref}^{t} = (1 - \alpha) \cdot H_{ref}^{t-1} + \alpha \cdot H_{best\_particle}$$
 
-
-
 Esto permite adaptarse a cambios de iluminación o rotación del objeto.
 
 > **Peligro:** Si actualizas demasiado rápido, el tracker puede aprenderse el fondo y derivar (drifting). Hay que hacerlo con cuidado (un $\alpha$ muy pequeño, ej. 0.01).
 
 ### 5. Parameters (`config.py`)
 
-Es la optimización de los valores `K`, $\alpha$, `std_noise`, etc. Esto se hace al final o en paralelo probando las mejoras.
+Optimización de valores `K`, $\alpha$, `std_noise`, `lost_obj_part_restart`, etc. Esto se hace al final o en paralelo probando las mejoras.
 
 ---
 
-## Propuesta de División de Trabajo (Branches)
+## Observaciones sobre reinicio de partículas
 
-Para evitar conflictos de merge, os sugiero dividir el archivo `particle_filter.py` conceptualmente. Uno toca la lógica de movimiento (principio del `update`) y el otro la lógica de evaluación (final del `update`).
-
-### Persona A: "El Navegante" (Dinámica y Estado)
-
-* **Responsabilidad:** Controlar dónde están las partículas y cómo se mueven.
-* **Archivos principales:** `particle_filter.py` (método `__init__` y primera mitad de `update`), `config.py`.
-* **Tareas:**
-* **Adaptive Noise:** Modificar la matriz de ruido `self.Sigma` dinámicamente en cada frame basándose en la calidad de la predicción anterior (puedes guardar el `max(self.w)` del frame anterior).
-* **Modelo de Movimiento:** Implementar un "switch" en `config.py` para elegir entre `ConstantVelocity` o `RandomWalk`. Modificar la matriz `self.A` en el `__init__` según esto.
-
-
-
-### Persona B: "El Observador" (Apariencia y Modelo)
-
-* **Responsabilidad:** Evaluar qué tan buenas son las partículas y actualizar el modelo del objeto.
-* **Archivos principales:** `particle_filter.py` (método `update` parte del bucle `for`, y funciones auxiliares), `config.py`.
-* **Tareas:**
-* **Modelo de Referencia Dinámico:** Al final del `update`, recalcular el histograma de la mejor partícula y mezclarlo con `self.hist_ref`.
-* **Dividir histograma en cuadrantes 2x2 + concatenar**: Esto a Elena le va bien (^-^)
-* **Histogramas Espaciales (Opcional pero recomendado):** Modificar `computeMultiChannelHistogram` o crear una nueva función que concatene histogramas de la mitad superior e inferior de la caja.
-
-
-
----
-
-## Cómo estructurar el código para el Merge
-
-Para que el merge sea suave, **no escribáis todo el código dentro del método `update` gigante**. Refactorizad el código en métodos pequeños dentro de la clase.
-
-Ejemplo de estructura recomendada para `particle_filter.py`:
+Cuando `Neff` cae por debajo de `cfg.lost_obj_Neff_th`, un porcentaje de partículas (`cfg.lost_obj_part_restart`) se puede reiniciar con distribución gaussiana alrededor de la última posición conocida del objeto:
 
 ```python
-class particle_filter:
-    def __init__(self, ...):
-        # ... init code ...
-        self.dynamic_update = False # Flag para Persona B
-
-    # --- ZONA PERSONA A ---
-    def predict_particles(self):
-        # Lógica de movimiento (A @ x + noise)
-        # Aquí metes la lógica de Adaptive Noise antes de aplicar el ruido
-        pass
-
-    # --- ZONA PERSONA B ---
-    def compute_likelihood(self, particle_state, frame):
-        # Lógica de extraer recorte, calcular histograma y Bhattacharyya
-        # Aquí metes la lógica de Histogramas Espaciales
-        pass
-
-    def update_model(self, best_particle_state, frame):
-        # Lógica para actualizar self.hist_ref
-        pass
-
-    # --- MÉTODO COMÚN (SOLO ORQUESTA) ---
-    def update(self, im):
-        # 1. Resampling (Ya hecho)
-        # ...
-        
-        # 2. Prediction (Llamada a método de A)
-        self.predict_particles() 
-        
-        # 3. Evaluation (Llamada a método de B dentro del bucle)
-        for i in range(self.N):
-             self.w[i] = self.compute_likelihood(self.x[i], im)
-        
-        # 4. Estimation (Ya hecho)
-        # ...
-        
-        # 5. Model Update (Llamada a método de B)
-        self.update_model(best_particle, im)
-
-```
-
-### Resumen de Ramas de Git
-
-* **`main`:** Código base funcional.
-* **`motion_model`:** Persona A. implementacion de modelos de movimiento distintos.
-* **`feature/observation-model`:** Persona B. Cambios en cálculo de histogramas, `self.w` y actualización de `self.hist_ref`.
-
-Si seguís esta estructura de métodos separados, al hacer merge, Git sabrá que uno ha añadido funciones arriba y otro abajo, y el conflicto en `update()` será mínimo (solo las llamadas a las funciones).
-
-## Comparision of results
-
-||  Approach                            |   Jakkard Index   |   max-time    |   max-time-video  ||
-||  Baseline                            |   0.502454        |   0.132458    |   Skating      ||
-||  Random_noise no linear velocity     |   0.366957        |   0.092872    |   Bolt      ||
-||  Linear vel add noise when Neff      |   0.517449        |   0.279883    |   Skating      ||
-||  Linear with MCMC update+Neff        |   0.513187        |   0.173892    |   Skating      ||
+H, W = im_shape[:2]
+x_global = self.x.mean(axis=0)  # última posición conocida
+for idx in range(num_reset):
+    self.x[idx, 0] = np.clip(x_global[0] + npr.randn() * 0.5 * W, 0, W)
+    self.x[idx, 1] = np.clip(x_global[1] + npr.randn() * 0.5 * H, 0, H)
+    self.x[idx, 2] = np.clip(x_global[2] + npr.randn() * 0.5 * x_global[2], 1, W)
+    self.x[idx, 3] = np.clip(x_global[3] + npr.randn() * 0.5 * x_global[3], 1, H)
+    self.x[idx, 4:] = 0
