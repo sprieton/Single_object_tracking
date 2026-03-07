@@ -13,3 +13,4 @@ alpha = 20.0                    #exponent to increase the sharpness of the parti
 prediction = 'weighted_avg'     # Method to compute the final prediction of the object state
 Neff_th = 0.3                   # Value of Neff to apply dynamic noise 
 noise_beta = 2.0                # scale for Neff metric for noise adaptative funcion
+mcmc_expl_fact = 1.0            # exploration factor to the MCMC particle exploration

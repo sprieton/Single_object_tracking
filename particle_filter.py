@@ -117,54 +117,20 @@ class particle_filter:
         # Number of params in the state
         P = self.x.shape[1] 
         
-        # Dimensions of the frame
-        height, width, colors = im.shape
-        
         #####STEP 1: PARTICLE RESAMPLING#####
         # Generate N random values between 0 and 1
         vals = npr.rand(self.N)
         #Choose particle indexes with a value large than vals
         idx_particles = np.searchsorted(self.c, vals)
-
-        # u0 = npr.rand() / self.N
-        # u = u0 + np.arange(self.N) / self.N
-        # idx_particles = np.searchsorted(self.c, u)
         # Get particle states
         x_past = self.x[idx_particles, :]
         
         #####STEP 2: UPDATE THE PARTICLE STATE#######
+        x_new = self.particle_update_(x_past, P)
+        
+        ##### STEP 3: UPDATE THE WEIGHTS ########
         im_hsv = rgb2hsv(im)[:, :, :2]
-        x_new = self.particle_update_(x_past, P, im_hsv)
-        
-        ##### STEP 3: EXTRACT THE CANDIDATE AREA ########
-        im_hsv = rgb2hsv(im)[:, :, :2]
-        
-        # Particles loop (this cannot be paralelized)
-        for i in range(self.N):
-            ##### STEP 4: EXTRACT THE CANDIDATE AREA ########
-            try:
-                # We extract the region in the image corresponding with the bounding box
-                limy = np.array([np.ceil(x_new[i,1]-0.5*x_new[i,3]), np.floor(x_new[i,1]+0.5*x_new[i,3])], dtype=int)
-                limy = np.clip(limy, 0, height)
-                limx = np.array([np.ceil(x_new[i,0]-0.5*x_new[i,2]), np.floor(x_new[i,0]+0.5*x_new[i,2])], dtype=int)
-                limx = np.clip(limx, 0, width)
-                candidate_reg = im_hsv[limy[0]:limy[1], limx[0]:limx[1], :] 
-                
-                ##### STEP 5: COMPUTE THE COLOR HISTOGRAM ###########
-                
-                # If size=0
-                if candidate_reg.size == 0:
-                    hist = np.zeros_like(self.hist_ref)
-                else:
-                    hist = computeMultiChannelHistogram(candidate_reg, self.K)
-            except:
-                hist = np.zeros_like(self.hist_ref)
-        
-            ########### STEP 6: COMPUTE THE BATTACHARYYA COEFICCIENT ###########
-            hist_intersect = (np.sqrt(self.hist_ref * hist)).sum()
-            
-            # Update the weight of the particle
-            self.w[i] = hist_intersect ** self.alpha   
+        self.weight_update_mcmc_(x_new, P, im_hsv)
         
         ########### STEP 7: UPDATE X, NORMALIZE THE WEIGHTS AND RECOMPUTE C ###########
         self.x = x_new
@@ -187,59 +153,133 @@ class particle_filter:
         
         self.bbox = np.array([x_global[0]-0.5*x_global[2], x_global[1]-0.5*x_global[3], x_global[2], x_global[3]])
 
-    def particle_update_(self, x_past, P, im_hsv):
+    def particle_update_(self, x_past, P):
         """
         Actualiza las partículas usando Resample-Move con MCMC.
         x_past: partículas remuestreadas (NxP)
         P: número de dimensiones del estado
-        im_hsv: imagen en HSV para evaluar la probabilidad
         """
-        N = x_past.shape[0]
-        
-        # 1️⃣ Propagación con ruido de movimiento clásico
-        noise_all = npr.randn(N, P) * self.Sigma
+        # 1- Dinamic noise with Neff
+        Neff = 1.0 / np.sum(self.w**2)
+        Neff /= self.N
+
+        # apply dinamic noise to the deprecated particles if necessary
+        dinamic_noise = self.Sigma.copy()
+        if Neff < cfg.Neff_th:
+            scale = 1 + cfg.noise_beta * (1 - Neff)
+            dinamic_noise *= scale
+
+        print(
+            f"Neff {Neff:.3f} | "
+            f"maxW {np.max(self.w):.3f} | "
+            f"stdW {np.std(self.w):.3f} | "
+            f"vel ({x_past[:,4].mean():.2f},{x_past[:,5].mean():.2f})",
+            end="\t"
+        )
+
+        # Compute the new state updating the previous one
+        noise_all = npr.randn(self.N, P) * dinamic_noise
         x_new = (self.A @ x_past.T).T + noise_all
         
-        # 2️⃣ MCMC move: ajustar cada partícula localmente
-        for i in range(N):
-            # Propuesta: mover la partícula actual con ruido pequeño
-            proposal = x_new[i] + npr.randn(P) * 0.1 * self.Sigma  # 0.1: paso de MCMC
+        return x_new
+    
+    def weight_update_mcmc_(self, x_new, P, im_hsv):
+        """
+        Applies a Metropolis-Hastings MCMC move to refine particle states after
+        propagation. Proposals are generated via Gaussian perturbations and
+        accepted based on the Bhattacharyya likelihood ratio, improving the
+        approximation of the posterior p(x_t | z_t).
+        """
+        n_accpeted = 0
+        p_proposal_mean = 0
+        p_curr_mean = 0
+        # Propagate the particles with MCMC 
+        # Particles loop (this cannot be paralelized)
+        for i in range(self.N):
+            # 1- Proposal of particle movment inverse proportional to the weight g=Gaussian
+            # + weight - MCMC step | - weight + MCMC step
+            # w_norm = self.w[i] / (np.max(self.w) + 1e-10)     # Normalized version
+            scale = cfg.mcmc_expl_fact * ( 0.5 + 0.5*(1-self.w[i]))
+           
+            # scale = np.clip(cfg.mcmc_expl_fact * (1 - self.w[i]), 0, cfg.mcmc_expl_fact)
+            proposal = x_new[i] + npr.randn(P) * scale * self.Sigma
             
-            # Limitar dentro de la imagen
+            # 2- Limit the proposal inisde the image
             proposal[0] = np.clip(proposal[0], 0, im_hsv.shape[1])
             proposal[1] = np.clip(proposal[1], 0, im_hsv.shape[0])
             proposal[2:4] = np.clip(proposal[2:4], 1, np.min(np.array(im_hsv.shape[0:2])))
             
-            # Extraer región candidata
-            limy = np.array([np.ceil(proposal[1]-0.5*proposal[3]), np.floor(proposal[1]+0.5*proposal[3])], dtype=int)
-            limx = np.array([np.ceil(proposal[0]-0.5*proposal[2]), np.floor(proposal[0]+0.5*proposal[2])], dtype=int)
-            limy = np.clip(limy, 0, im_hsv.shape[0])
-            limx = np.clip(limx, 0, im_hsv.shape[1])
-            candidate = im_hsv[limy[0]:limy[1], limx[0]:limx[1], :]
+            # 3- Get the candidate histogram
+            hist_prop = self.get_particle_hist_(proposal, im_hsv)
+            hist_curr = self.get_particle_hist_(x_new[i], im_hsv)
             
-            # Calcular similitud de histogramas (probabilidad)
-            if candidate.size == 0:
-                p_proposal = 0.0
-            else:
-                hist = computeMultiChannelHistogram(candidate, self.K)
-                p_proposal = (np.sqrt(self.hist_ref * hist)).sum() ** self.alpha
-            
-            # Peso actual de la partícula
-            limy_old = np.array([np.ceil(x_new[i,1]-0.5*x_new[i,3]), np.floor(x_new[i,1]+0.5*x_new[i,3])], dtype=int)
-            limx_old = np.array([np.ceil(x_new[i,0]-0.5*x_new[i,2]), np.floor(x_new[i,0]+0.5*x_new[i,2])], dtype=int)
-            limy_old = np.clip(limy_old, 0, im_hsv.shape[0])
-            limx_old = np.clip(limx_old, 0, im_hsv.shape[1])
-            candidate_old = im_hsv[limy_old[0]:limy_old[1], limx_old[0]:limx_old[1], :]
-            if candidate_old.size == 0:
-                p_current = 0.0
-            else:
-                hist_old = computeMultiChannelHistogram(candidate_old, self.K)
-                p_current = (np.sqrt(self.hist_ref * hist_old)).sum() ** self.alpha
-            
-            # 3️⃣ Criterio de aceptación Metropolis-Hastings
+            # 4- get the proposal probability and original probability
+            p_proposal = self.get_Battacharyya_(hist_prop) ** self.alpha
+            p_current = self.get_Battacharyya_(hist_curr) ** self.alpha
+            p_proposal_mean += p_proposal
+            p_curr_mean += p_current
+
+            # 5- Accpetance ratio α = p(x′)/p(xt​) ​(Metropolis-Hastings)
             accept_ratio = min(1.0, p_proposal / (p_current + 1e-10))
-            if npr.rand() < accept_ratio:
-                x_new[i] = proposal  # Aceptar la propuesta
-            # Si no, mantener x_new[i] como estaba
-        
-        return x_new
+
+            # 6- Accept probability u ≤ α / u∼U(0,1) and update the weights
+            if npr.rand() <= accept_ratio:
+                x_new[i] = proposal  # Accept the proposal
+                self.w[i] = p_proposal
+                n_accpeted += 1
+            else: # we keep the original particle
+                self.w[i] = p_current
+
+        p_proposal_mean /= self.N
+        p_curr_mean /= self.N
+
+        print(f"Accpeted: ({n_accpeted}/{self.N}), prop({p_proposal_mean}) orig({p_curr_mean})", end="")
+
+    
+    def get_particle_hist_(self, particle, im_hsv):
+        """
+        Extracts the image region defined by a particle bounding box and
+        computes its HSV color histogram.
+
+        Parameters
+        ----------
+        particle : array-like
+            State vector of the particle [x, y, width, height, ...].
+        im_hsv : ndarray
+            Input image in HSV space.
+
+        Returns
+        -------
+        hist : ndarray
+            Normalized histogram of the candidate region.
+        """
+
+        height, width, _ = im_hsv.shape
+
+        # Particle parameters
+        x, y, w, h = particle[:4]
+
+        try:
+            # Compute bounding box limits
+            limy = np.array([np.ceil(y - 0.5 * h), np.floor(y + 0.5 * h)], dtype=int)
+            limy = np.clip(limy, 0, height)
+
+            limx = np.array([np.ceil(x - 0.5 * w), np.floor(x + 0.5 * w)], dtype=int)
+            limx = np.clip(limx, 0, width)
+
+            # Extract candidate region
+            candidate_reg = im_hsv[limy[0]:limy[1], limx[0]:limx[1], :]
+
+            # Compute histogram
+            if candidate_reg.size == 0:
+                hist = np.zeros_like(self.hist_ref)
+            else:
+                hist = computeMultiChannelHistogram(candidate_reg, self.K)
+
+        except Exception:
+            hist = np.zeros_like(self.hist_ref)
+
+        return hist
+
+    def get_Battacharyya_(self, hist):
+        return (np.sqrt(self.hist_ref * hist)).sum()
