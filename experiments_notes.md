@@ -131,3 +131,7 @@ class particle_filter:
 * **`feature/observation-model`:** Persona B. Cambios en cálculo de histogramas, `self.w` y actualización de `self.hist_ref`.
 
 Si seguís esta estructura de métodos separados, al hacer merge, Git sabrá que uno ha añadido funciones arriba y otro abajo, y el conflicto en `update()` será mínimo (solo las llamadas a las funciones).
+
+
+## Persona A: El navegante (Santi el capitan)
+## Persona B: El observador. (Jorge el curioso)
