@@ -16,7 +16,8 @@ from scipy.io import loadmat
 from particle_filter import particle_filter
 from visualization import showBB, showParticles
 from metrics import computeJI
-import time                       
+import time 
+import config as cfg
 
 def parse_args():
     """
@@ -87,6 +88,8 @@ def object_tracking(video, N, VERBOSE, seed=1):
                 break
         #Compute the Jacard-Index
         JI[n]=computeJI(labels[n,:4],tracker.bbox[:4]);
+        if cfg.DEBUG:
+            print(f"Jaccard:{JI[n]}")
         if n%50==0:
             print('Frame %d/%d average JI %f'%(n,numFrames,JI[:n+1].mean()));
         

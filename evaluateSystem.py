@@ -24,8 +24,8 @@ def parse_args():
                         help='number of repetitions for each video. Larger values improve stability bu take longer (default 4)',
                         default=4, type=int)
     parser.add_argument('--N', dest='N',  
-                       help='numParticles to be used in the filter (default N=100)',
-                       type=int, default=100)
+                       help='numParticles to be used in the filter (default N=300)',
+                       type=int, default=300)
 
     args = parser.parse_args()
     return args
