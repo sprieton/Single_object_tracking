@@ -103,6 +103,7 @@ class particle_filter:
         self.w=(1/self.N)*np.ones((self.N,));
         #Cumulative weights for particle resampling
         self.c=np.cumsum(self.w);
+        self.v_global = np.zeros(2)
 
         #Vector with standard deviations of additive gaussian noise
         #Each dimension corresponds with one element in the state
@@ -129,8 +130,9 @@ class particle_filter:
         x_new = self.particle_update_(x_past, P, im.shape)
         
         ##### STEP 3: UPDATE THE WEIGHTS ########
+        self.v_global = np.average(self.x[:,4:6], axis=0, weights=self.w)   # update the velocity of the system
         im_hsv = rgb2hsv(im)[:, :, :2]
-        self.weight_update_mcmc_(x_new, P, im_hsv)
+        self.weight_update_mcmc_(x_new, x_past, P, im_hsv)
         
         ########### STEP 4: NORMALIZE WEIGHTS AND RECOMPUTE C ###########
         self.x = x_new
@@ -155,7 +157,6 @@ class particle_filter:
             idx_particle = np.argmax(self.w)
             x_global = self.x[idx_particle, ...]
 
-        
         # Update bbox from x_global
         self.bbox = np.array([
             x_global[0] - 0.5 * x_global[2],
@@ -164,14 +165,16 @@ class particle_filter:
             x_global[3]
         ])
 
-        ##### STEP 6: UPDATE REFERENCE HISTOGRAM ADAPTIVE #####
-        self.update_hist_ref(im_hsv, x_global, Neff, cfg.update_new_inf)
-
     def particle_update_(self, x_past, P, im_shape):
         """
-        Actualiza las partículas usando Resample-Move con MCMC.
-        x_past: partículas remuestreadas (NxP)
-        P: número de dimensiones del estado
+        Updates the particles using a Resample-Move strategy with MCMC.
+
+        Parameters
+        ----------
+        x_past : ndarray
+            Resampled particles (NxP).
+        P : int
+            Number of state dimensions.
         """
         # 1- Dinamic noise with Neff
         Neff = 1.0 / np.sum(self.w**2)
@@ -179,27 +182,9 @@ class particle_filter:
 
         # apply dinamic noise to the deprecated particles if necessary
         dinamic_noise = self.Sigma.copy()
-        if cfg.lost_obj_Neff_th < Neff < cfg.dinamic_Neff_th:
+        if Neff < cfg.dinamic_Neff_th:
             scale = 1 + cfg.noise_beta * (1 - Neff)
             dinamic_noise *= scale
-
-        ## In case we lost object we restart some particles
-        elif Neff < cfg.lost_obj_Neff_th: 
-            num_reset = int(cfg.lost_obj_part_restart * self.N)
-            H, W = im_shape[:2]
-            x_global = x_past.mean(axis=0)  # last known position
-
-            for idx in range(num_reset):
-                # Gaussian distribution of the restarted particles to search the object
-                x_past[idx, 0] = np.clip(x_global[0] + (npr.randn() * 0.2 * W), 0, W)    # x 
-                x_past[idx, 1] = np.clip( x_global[1] + (npr.randn() * 0.2 * H), 0, H)   # y 
-                # width and height as the last known position + little noise
-                x_past[idx, 2] = np.clip(x_global[2] + npr.randn() * 0.1 * x_global[2], 1, W)  # width
-                x_past[idx, 3] = np.clip(x_global[3] + npr.randn() * 0.1 * x_global[3], 1, H)  # height
-                # velocities = 0
-                x_past[idx, 4:] = 0
-            if cfg.DEBUG:
-                print(f"Restarted {cfg.lost_obj_part_restart}%")
 
         if cfg.DEBUG:
             print(
@@ -209,100 +194,131 @@ class particle_filter:
                 f"vel ({x_past[:,4].mean():.2f},{x_past[:,5].mean():.2f})",
                 end="\t"
             )
-
-        # Compute the new state updating the previous one
-        noise_all = npr.randn(self.N, P) * dinamic_noise
-        x_new = (self.A @ x_past.T).T + noise_all
         
+        # 2- Apply linear motion model
+        x_new = (self.A @ x_past.T).T
+
+        # 3- Compute particle speed
+        speed = np.linalg.norm(x_past[:,4:6], axis=1)
+
+        # factor Nx1 for broadcasting
+        speed_factor = 1 + cfg.speed_noise_factor * np.tanh(speed)[:, None]
+
+        # 4- Generate separated noise for position and velocty
+        noise_pos = npr.randn(self.N, 4) * dinamic_noise[:4] * speed_factor
+        noise_vel = npr.randn(self.N, 4) * dinamic_noise[4:]
+
+        # 5- Apply noise
+        x_new[:, :4] += noise_pos
+        x_new[:, 4:] += noise_vel
+
         return x_new
     
-    def update_hist_ref(self, im_hsv, x_global, Neff, beta=0.1):
-        """
-        Updates the reference histogram based on the current estimated bbox (x_global)
-        and the reliability of the particle set (Neff).
-
-        Parameters
-        ----------
-        im_hsv : ndarray
-            Current image in HSV space (H and S channels).
-        x_global : array-like
-            State vector representing the estimated object [x, y, w, h, ...].
-        Neff : float
-            Effective number of particles (between 0 and 1).
-        beta : float
-            Base update rate (can be scaled by Neff).
-        """
-        # Extract histogram of the estimated bbox
-        hist_candidate = self.get_particle_hist_(x_global, im_hsv)
-
-        # Compute similarity with current reference
-        sim_global = self.get_Battacharyya_(hist_candidate)
-
-        # Update rate scales with Neff and similarity
-        update_rate = np.clip((Neff / cfg.dinamic_Neff_th) * 2*beta, 0, beta)
-
-        # Only update if similarity is reasonably high
-        if cfg.DEBUG:
-            print(f"sim of hist: {sim_global:.3f}", end=" | ")
-        if sim_global > cfg.hist_update_th:
-            if cfg.DEBUG:
-                print(f"updated {update_rate:.3f}%", end=" | ")
-            self.hist_ref = (1 - update_rate) * self.hist_ref + update_rate * hist_candidate
-            self.hist_ref /= self.hist_ref.sum() + 1e-10
-    
-    def weight_update_mcmc_(self, x_new, P, im_hsv):
+    def weight_update_mcmc_(self, x_new, x_past, P, im_hsv):
         """
         Applies a Metropolis-Hastings MCMC move to refine particle states after
         propagation. Proposals are generated via Gaussian perturbations and
         accepted based on the Bhattacharyya likelihood ratio, improving the
         approximation of the posterior p(x_t | z_t).
         """
-        n_accpeted = 0
+        n_accepted = 0
         p_proposal_mean = 0
         p_curr_mean = 0
+        max_w = np.max(self.w) + 1e-10
+
         # Propagate the particles with MCMC 
         # Particles loop (this cannot be paralelized)
         for i in range(self.N):
             # 1- Proposal of particle movment inverse proportional to the weight g=Gaussian
             # + weight - MCMC step | - weight + MCMC step
-            w_norm = self.w[i] / (np.max(self.w) + 1e-10)     # Normalized version
-            # w = self.w[i]
-            scale = cfg.mcmc_expl_fact * (1-w_norm)
-           
-            # scale = np.clip(cfg.mcmc_expl_fact * (1 - self.w[i]), 0, cfg.mcmc_expl_fact)
-            proposal = x_new[i] + npr.randn(P) * scale * self.Sigma
+            w_norm = self.w[i] / max_w     # Normalized version
             
-            # 2- Limit the proposal inisde the image
+            # proportions of the exploration
+            speed = np.linalg.norm(x_new[i][4:6])
+            scale = cfg.mcmc_expl_fact * (1 - w_norm) * (1 + cfg.speed_mcmc_factor * speed)
+           
+            # 2- Create the proposal using the scales of ecploration
+            proposal = x_new[i].copy()
+            noise = npr.randn(P) * scale * self.Sigma
+
+            # velocity guided exploration
+            vel = x_new[i][4:6]
+            vel_norm = vel / (np.linalg.norm(vel) + 1e-10)
+            noise[:2] += vel_norm * scale
+
+            proposal += noise
+
+            # # 1- Normalizamos la exploración por peso
+            # w_norm = self.w[i] / max_w
+            # scale_noise = cfg.mcmc_expl_fact * (1 - w_norm)
+
+            # # 2- Tomamos la velocidad del último update
+            # vel_prev = x_new[i][4:6]                 # [vx, vy]
+            # speed_prev = np.linalg.norm(vel_prev)    # magnitud de la velocidad
+            # vel_dir = vel_prev / (speed_prev + 1e-10) # dirección normalizada
+
+            # # 3- Sesgo de movimiento: mover la partícula en la dirección de vel_prev
+            # move_bias = vel_dir * speed_prev          # escala por la velocidad del movimiento anterior
+
+            # # 4- Crear la propuesta
+            # proposal = x_new[i].copy()
+            # noise = npr.randn(P) * scale_noise * self.Sigma
+            # proposal[:2] += move_bias    # mover en dirección del último update
+            # proposal += noise  
+
+            # Adjust the propsosal with the last direction of the 
+            
+            # 3- Limit the proposal inisde the image
             proposal[0] = np.clip(proposal[0], 0, im_hsv.shape[1])
             proposal[1] = np.clip(proposal[1], 0, im_hsv.shape[0])
             proposal[2:4] = np.clip(proposal[2:4], 1, np.min(np.array(im_hsv.shape[0:2])))
             
-            # 3- Get the candidate histogram
+            # 4- Get the candidate likelihoods
             hist_prop = self.get_particle_hist_(proposal, im_hsv)
             hist_curr = self.get_particle_hist_(x_new[i], im_hsv)
             
-            # 4- get the proposal probability and original probability
             p_proposal = self.get_Battacharyya_(hist_prop) ** self.alpha
             p_current = self.get_Battacharyya_(hist_curr) ** self.alpha
             p_proposal_mean += p_proposal
             p_curr_mean += p_current
 
-            # 5- Accpetance ratio α = p(x′)/p(xt​) ​(Metropolis-Hastings)
+            # 5- add Dynamic likelihood of proposal and original velocity
+            # vel_prop = proposal[4:6]
+            # vel_curr = x_new[i][4:6]
+
+            # motion_prop = np.exp(-0.5*np.sum((vel_prop-self.v_global)**2)/cfg.motion_sigma)
+            # motion_curr = np.exp(-0.5*np.sum((vel_curr-self.v_global)**2)/cfg.motion_sigma)
+
+            # p_proposal *= motion_prop
+            # p_current *= motion_curr
+
+            # 6- Use Metropolis Hastings to update the particles proporsals
+            # Accpetance ratio α = p(x′)/p(xt​) ​(Metropolis-Hastings)
             accept_ratio = min(1.0, p_proposal / (p_current + 1e-10))
 
-            # 6- Accept probability u ≤ α / u∼U(0,1) and update the weights
-            if npr.rand() <= accept_ratio:
-                x_new[i] = proposal  # Accept the proposal
-                self.w[i] = p_proposal
-                n_accpeted += 1
-            else: # we keep the original particle
+            # Accept probability u ≤ α / u∼U(0,1) and update the weights
+            log_ratio = np.log(p_proposal + 1e-12) - np.log(p_current + 1e-12)
+            accept_ratio = min(1.0, np.exp(log_ratio))
+
+            if npr.rand() < accept_ratio:
+                x_new[i] = proposal # Accept the proposal
+                self.w[i] = p_proposal  
+                n_accepted += 1
+
+            else:   # we keep the original particle
                 self.w[i] = p_current
+            # if npr.rand() <= accept_ratio:
+            #     x_new[i] = proposal  
+            #     self.w[i] = p_proposal
+            #     n_accepted += 1
+            # else: 
+            #     self.w[i] = p_current
 
         p_proposal_mean /= self.N
         p_curr_mean /= self.N
         
         if cfg.DEBUG:
-            print(f"Accpeted: ({n_accpeted}/{self.N})", end="")
+            print(f"Accpeted: ({n_accepted}/{self.N})", end="")
     
     def get_particle_hist_(self, particle, im_hsv):
         """

@@ -13,11 +13,12 @@ alpha = 20.0                    #exponent to increase the sharpness of the parti
 prediction = 'weighted_avg'     # Method to compute the final prediction of the object state
 dinamic_Neff_th = 0.3                   # Value of Neff to apply dynamic noise 
 noise_beta = 2.0                # scale for Neff metric for noise adaptative funcion
-mcmc_expl_fact = 1.0            # exploration factor to the MCMC particle exploration
 update_new_inf = 0.02           # Update a 2% of the old reference with the new mask
 hist_update_th = 0.9            # how good must be the new histogram to be updated reference
-lost_obj_Neff_th = 0.00         # Neff value under threshold consider we lost object
-lost_obj_part_restart = 0.1     # Number of particles randomized when lost object
+motion_sigma = 100
+speed_noise_factor = 0.5
+mcmc_expl_fact = 2.0            # exploration factor to the MCMC particle exploration
+speed_mcmc_factor = 0.5         # speed factor to the MCMC particle exploration
 
 # flags
 DEBUG = False

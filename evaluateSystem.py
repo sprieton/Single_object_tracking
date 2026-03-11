@@ -14,6 +14,7 @@ from object_tracking import object_tracking
 from multiprocessing import Pool
 from functools import partial
 import pdb
+import config as cfg
 
 def parse_args():
     """
@@ -26,6 +27,17 @@ def parse_args():
     parser.add_argument('--N', dest='N',  
                        help='numParticles to be used in the filter (default N=300)',
                        type=int, default=300)
+    
+    # New arguments for parameter tuning
+    parser.add_argument('--sigma', nargs=8, type=float,
+                        help='Standard deviation of noise for state vector [x,y,w,h,vx,vy,vw,vh]',
+                        default=cfg.std_noise)
+    parser.add_argument('--alpha', type=float,
+                        help='Exponent for Bhattacharyya similarity',
+                        default=cfg.alpha)
+    parser.add_argument('--speed_noise_factor', type=float,
+                        help='Factor to scale positional noise with speed',
+                        default=cfg.speed_noise_factor)
 
     args = parser.parse_args()
     return args
@@ -35,6 +47,11 @@ if __name__ == '__main__':
 
     print('Called with args:')
     print(args)
+
+    # Override config values with command-line arguments
+    cfg.std_noise = np.array(args.sigma)
+    cfg.alpha = args.alpha
+    cfg.speed_noise_factor = args.speed_noise_factor
     
     videos={'Basketball','Biker','Bolt','Skating'};
     # videos={'Biker'}
