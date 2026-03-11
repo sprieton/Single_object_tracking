@@ -94,7 +94,7 @@ class particle_filter:
         objim_hsv = rgb2hsv(objim)[:, :, :2]
 
         #Compute the reference histogram => work in hsv space
-        self.hist_ref =  computeMultiChannelHistogram(objim_hsv, self.K)  
+        self.hist_ref = computeMultiChannelHistogram(objim_hsv, self.K)  
         
         #Copy the state to all particles x is NxP being N the number of particles and P the number of parameters 
         self.x=np.tile(self.x_init,(self.N,1));
@@ -125,6 +125,7 @@ class particle_filter:
         idx_particles = np.searchsorted(self.c, vals)
         # Get particle states
         x_past = self.x[idx_particles, :]
+        self.vel_history = []
         
         #####STEP 2: UPDATE THE PARTICLE STATE#######
         x_new = self.particle_update_(x_past, P, im.shape)
@@ -198,22 +199,50 @@ class particle_filter:
         # 2- Apply linear motion model
         x_new = (self.A @ x_past.T).T
 
-        # 3- Compute particle speed
-        speed = np.linalg.norm(x_past[:,4:6], axis=1)
+        # 3- Compute average velocity and magnitude
+        vel_mean = np.mean(x_past[:, 4:6], axis=0)            # 2D velocity vector
+        vel_mag = np.linalg.norm(vel_mean)                   # magnitude
+        vel_dir = vel_mean / (vel_mag + 1e-10)              # normalized direction
+        self.vel_history.append(vel_mag)
+        if len(self.vel_history) > cfg.num_frames_vel:
+            self.vel_history.pop(0)
 
-        # factor Nx1 for broadcasting
-        speed_factor = 1 + cfg.speed_noise_factor * np.tanh(speed)[:, None]
+        # 4- Determine speed factor and adaptive t-Student degrees of freedom
+        if len(self.vel_history) < cfg.num_frames_vel:
+            speed_factor = 1.0
+            df = cfg.t_df_max
+        else:
+            avg_speed = np.mean(self.vel_history)
+            speed_factor = 1.0 + cfg.speed_noise_factor * avg_speed
+            # Adaptive df: higher df → lower speed, lower df → higher speed
+            df = np.clip(cfg.t_df_max / (1.0 + cfg.t_df_speed_factor * avg_speed), 
+                         cfg.t_df_min, cfg.t_df_max)
 
-        # 4- Generate separated noise for position and velocty
-        noise_pos = npr.randn(self.N, 4) * dinamic_noise[:4] * speed_factor
-        noise_vel = npr.randn(self.N, 4) * dinamic_noise[4:]
+        # 5- Generate base t-Student noise for position (2D: x,y)
+        noise_base = npr.standard_t(df, size=(self.N, 2))
 
-        # 5- Apply noise
-        x_new[:, :4] += noise_pos
-        x_new[:, 4:] += noise_vel
+        # 6- Compute perpendicular direction for lateral exploration
+        perp_dir = np.array([-vel_dir[1], vel_dir[0]])
+
+        # 7- Scale noise along parallel and perpendicular directions
+        scale_parallel = dinamic_noise[:2] * speed_factor
+        scale_perp = dinamic_noise[:2] * speed_factor * 0.3  # smaller lateral component
+
+        # 8- Deform noise along motion direction
+        noise_pos = (noise_base[:, 0][:, None] * vel_dir * scale_parallel) + \
+                    (noise_base[:, 1][:, None] * perp_dir * scale_perp)
+
+        # 9- Apply noise to bounding box width/height and velocity (unmodified t-Student)
+        noise_size = npr.standard_t(df, size=(self.N, 2)) * dinamic_noise[2:4] * speed_factor
+        noise_vel = npr.standard_t(df, size=(self.N, 4)) * dinamic_noise[4:] * speed_factor
+
+        # 10- Update particle states
+        x_new[:, :2] += noise_pos       # x,y positions
+        x_new[:, 2:4] += noise_size     # width, height
+        x_new[:, 4:] += noise_vel       # velocities
 
         return x_new
-    
+        
     def weight_update_mcmc_(self, x_new, x_past, P, im_hsv):
         """
         Applies a Metropolis-Hastings MCMC move to refine particle states after
@@ -247,26 +276,6 @@ class particle_filter:
             noise[:2] += vel_norm * scale
 
             proposal += noise
-
-            # # 1- Normalizamos la exploración por peso
-            # w_norm = self.w[i] / max_w
-            # scale_noise = cfg.mcmc_expl_fact * (1 - w_norm)
-
-            # # 2- Tomamos la velocidad del último update
-            # vel_prev = x_new[i][4:6]                 # [vx, vy]
-            # speed_prev = np.linalg.norm(vel_prev)    # magnitud de la velocidad
-            # vel_dir = vel_prev / (speed_prev + 1e-10) # dirección normalizada
-
-            # # 3- Sesgo de movimiento: mover la partícula en la dirección de vel_prev
-            # move_bias = vel_dir * speed_prev          # escala por la velocidad del movimiento anterior
-
-            # # 4- Crear la propuesta
-            # proposal = x_new[i].copy()
-            # noise = npr.randn(P) * scale_noise * self.Sigma
-            # proposal[:2] += move_bias    # mover en dirección del último update
-            # proposal += noise  
-
-            # Adjust the propsosal with the last direction of the 
             
             # 3- Limit the proposal inisde the image
             proposal[0] = np.clip(proposal[0], 0, im_hsv.shape[1])
