@@ -64,3 +64,14 @@ for idx in range(num_reset):
     self.x[idx, 2] = np.clip(x_global[2] + npr.randn() * 0.5 * x_global[2], 1, W)
     self.x[idx, 3] = np.clip(x_global[3] + npr.randn() * 0.5 * x_global[3], 1, H)
     self.x[idx, 4:] = 0
+```
+
+# Tracker de resultados:
+
+Mejor hasta ahora:
+
+Base de Santi: Total average Results are JI=0.516555
+
+Histograma partido: Total average Results are JI=0.515722
+
+Vale ahora genera el plan para implementar que el objeto de referencia se vaya actualizando. 

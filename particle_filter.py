@@ -10,6 +10,14 @@ import numpy as np
 from skimage.color import rgb2hsv
 import pdb
 import numpy.random as npr
+try:
+    import torch
+    import torchvision.transforms as transforms
+    from torchvision.models import mobilenet_v3_small, MobileNet_V3_Small_Weights
+    import torch.nn.functional as F
+    HAS_TORCH = True
+except (ImportError, RuntimeError):
+    HAS_TORCH = False
 import config as cfg
 
 def computeMultiChannelHistogram(im, K):
@@ -94,8 +102,42 @@ class particle_filter:
         objim_hsv = rgb2hsv(objim)[:, :, :2]
 
         #Compute the reference histogram => work in hsv space
-        self.hist_ref =  computeMultiChannelHistogram(objim_hsv, self.K)  
+        # Spatial Histogram: Split into Top and Bottom
+        h_obj, _, _ = objim_hsv.shape
+        h_half = h_obj // 2
+        hist_top = computeMultiChannelHistogram(objim_hsv[:h_half, :, :], self.K)
+        hist_bottom = computeMultiChannelHistogram(objim_hsv[h_half:, :, :], self.K)
+        self.hist_ref = np.concatenate((hist_top, hist_bottom)) / 2.0
+        self.hist_init = self.hist_ref.copy()
         
+        # Deep Learning Initialization
+        self.dl_ref = None
+        self.dl_model = None
+        self.transform = None
+        
+        if cfg.observation_model == 'deep_learning':
+            if not HAS_TORCH:
+                raise ImportError("PyTorch is required for deep_learning mode. Install it via pip.")
+            
+            # Load lightweight model
+            self.device = torch.device(cfg.device if torch.cuda.is_available() else 'cpu')
+            print(f"Deep Learning Model loaded on: {self.device}")
+            # Use MobileNetV3 Small - extremely fast
+            self.dl_model = mobilenet_v3_small(weights=MobileNet_V3_Small_Weights.DEFAULT).to(self.device)
+            self.dl_model.eval() # Set to evaluation mode
+            
+            # Preprocessing transforms
+            self.transform = transforms.Compose([
+                transforms.ToPILImage(),
+                transforms.Resize(cfg.dl_input_size),
+                transforms.ToTensor(),
+                transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+            ])
+            
+            # Compute reference embedding
+            # objim is RGB (from object_tracking.py)
+            self.dl_ref = self.compute_deep_embedding_single_(objim)
+
         #Copy the state to all particles x is NxP being N the number of particles and P the number of parameters 
         self.x=np.tile(self.x_init,(self.N,1));
 
@@ -129,8 +171,22 @@ class particle_filter:
         x_new = self.particle_update_(x_past, P, im.shape)
         
         ##### STEP 3: UPDATE THE WEIGHTS ########
-        im_hsv = rgb2hsv(im)[:, :, :2]
-        self.weight_update_mcmc_(x_new, P, im_hsv)
+        if cfg.observation_model == 'deep_learning':
+            # For Deep Learning, we skip MCMC because running the network iteratively is too slow.
+            # We evaluate all particles in a BATCH.
+            
+            # 1. Compute Color Likelihoods (Fast)
+            im_hsv = rgb2hsv(im)[:, :, :2]
+            color_weights = self.compute_color_likelihoods_batch_(x_new, im_hsv)
+            
+            # 2. Compute Deep Learning Likelihoods (Batch Processing)
+            dl_weights = self.compute_deep_likelihoods_batch_(x_new, im)
+            
+            # 3. Combine
+            self.w = (1 - cfg.dl_weight) * color_weights + cfg.dl_weight * dl_weights
+        else:
+            im_hsv = rgb2hsv(im)[:, :, :2]
+            self.weight_update_mcmc_(x_new, P, im_hsv)
         
         ########### STEP 4: NORMALIZE WEIGHTS AND RECOMPUTE C ###########
         self.x = x_new
@@ -142,7 +198,7 @@ class particle_filter:
         Neff = 1.0 / np.sum(self.w**2) / self.N
 
         if cfg.prediction == 'weighted_avg':
-            frac_particles = np.clip(Neff / cfg.dinamic_Neff_th, 0.3, 1.0)
+            frac_particles = np.clip(Neff / cfg.dinamic_Neff_th, cfg.pred_min_frac, 1.0)
             if cfg.DEBUG:
                 print(f"avg of {frac_particles:.3f}%", end=" | ")
             n_use = max(1, int(self.N * frac_particles))
@@ -154,6 +210,20 @@ class particle_filter:
         elif cfg.prediction == 'max':
             idx_particle = np.argmax(self.w)
             x_global = self.x[idx_particle, ...]
+            
+        elif cfg.prediction == 'robust_mean':
+            # 1. Initial weighted estimate using all particles
+            x_mean = np.average(self.x, weights=self.w, axis=0)
+            
+            # 2. Filter spatial outliers (particles too far from the center)
+            # Threshold: half of the object diagonal
+            dists = np.linalg.norm(self.x[:, :2] - x_mean[:2], axis=1)
+            threshold = np.linalg.norm(x_mean[2:4]) * 0.5
+            mask = dists < threshold
+            
+            # 3. Recompute weighted average with inliers only
+            w_masked = self.w[mask] + 1e-30 # Avoid division by zero
+            x_global = np.average(self.x[mask], weights=w_masked, axis=0)
 
         
         # Update bbox from x_global
@@ -232,6 +302,11 @@ class particle_filter:
         beta : float
             Base update rate (can be scaled by Neff).
         """
+        # Reset reference if object is lost to avoid learning background
+        if Neff < cfg.lost_obj_Neff_th:
+            self.hist_ref = self.hist_init.copy()
+            return
+
         # Extract histogram of the estimated bbox
         hist_candidate = self.get_particle_hist_(x_global, im_hsv)
 
@@ -248,8 +323,84 @@ class particle_filter:
             if cfg.DEBUG:
                 print(f"updated {update_rate:.3f}%", end=" | ")
             self.hist_ref = (1 - update_rate) * self.hist_ref + update_rate * hist_candidate
+            
+            # Anchor to initial histogram to prevent drifting
+            self.hist_ref = (1 - cfg.anchor_weight) * self.hist_ref + cfg.anchor_weight * self.hist_init
             self.hist_ref /= self.hist_ref.sum() + 1e-10
     
+    def compute_deep_embedding_single_(self, patch):
+        """Helper to compute embedding for a single patch (used for reference)"""
+        if patch.size == 0: return torch.zeros(1000).to(self.device)
+        tensor = self.transform(patch).unsqueeze(0).to(self.device)
+        with torch.no_grad():
+            embedding = self.dl_model(tensor)
+        return embedding # Shape (1, 1000)
+
+    def compute_deep_likelihoods_batch_(self, particles, im_rgb):
+        """
+        Extracts all particle patches, stacks them into a batch, and runs the CNN once.
+        """
+        height, width, _ = im_rgb.shape
+        batch_tensors = []
+        valid_indices = []
+        
+        # 1. Extract and Preprocess Patches
+        for i in range(self.N):
+            x, y, w, h = particles[i, :4]
+            
+            limy = np.clip([np.ceil(y - 0.5 * h), np.floor(y + 0.5 * h)], 0, height).astype(int)
+            limx = np.clip([np.ceil(x - 0.5 * w), np.floor(x + 0.5 * w)], 0, width).astype(int)
+            
+            patch = im_rgb[limy[0]:limy[1], limx[0]:limx[1], :]
+            
+            if patch.size > 0 and patch.shape[0] > 0 and patch.shape[1] > 0:
+                try:
+                    tensor = self.transform(patch)
+                    batch_tensors.append(tensor)
+                    valid_indices.append(i)
+                except Exception:
+                    pass # Skip malformed patches
+
+        if not batch_tensors:
+            return np.zeros(self.N)
+
+        # 2. Stack into a single tensor (Batch Size, 3, H, W)
+        batch_input = torch.stack(batch_tensors).to(self.device)
+        
+        # 3. Run Inference (One forward pass for N particles)
+        with torch.no_grad():
+            embeddings = self.dl_model(batch_input) # Shape (N_valid, 1000)
+        
+        # 4. Compute Cosine Similarity with Reference
+        # self.dl_ref is (1, 1000), embeddings is (N_valid, 1000)
+        # Cosine Sim = (A . B) / (|A|*|B|)
+        # F.cosine_similarity computes similarity along dim 1
+        sims = F.cosine_similarity(self.dl_ref, embeddings)
+        
+        # 5. Map back to weights array
+        weights = np.zeros(self.N)
+        sims_np = sims.cpu().numpy()
+        
+        # Clip negative similarities (DL embeddings can be orthogonal or opposite)
+        sims_np = np.clip(sims_np, 0, 1.0)
+        
+        # Apply exponent alpha to sharpen distribution (like in Bhattacharyya)
+        weights[valid_indices] = sims_np ** self.alpha
+        
+        return weights
+
+    def compute_color_likelihoods_batch_(self, particles, im_hsv):
+        """
+        Computes color histogram likelihoods for all particles without MCMC.
+        Used when DL mode is active.
+        """
+        weights = np.zeros(self.N)
+        for i in range(self.N):
+            hist = self.get_particle_hist_(particles[i], im_hsv)
+            sim = self.get_Battacharyya_(hist)
+            weights[i] = sim ** self.alpha
+        return weights
+
     def weight_update_mcmc_(self, x_new, P, im_hsv):
         """
         Applies a Metropolis-Hastings MCMC move to refine particle states after
@@ -342,7 +493,12 @@ class particle_filter:
             if candidate_reg.size == 0:
                 hist = np.zeros_like(self.hist_ref)
             else:
-                hist = computeMultiChannelHistogram(candidate_reg, self.K)
+                # Spatial Histogram: Split into Top and Bottom
+                h_c, _, _ = candidate_reg.shape
+                h_half = h_c // 2
+                hist_top = computeMultiChannelHistogram(candidate_reg[:h_half, :, :], self.K)
+                hist_bottom = computeMultiChannelHistogram(candidate_reg[h_half:, :, :], self.K)
+                hist = np.concatenate((hist_top, hist_bottom)) / 2.0
 
         except Exception:
             hist = np.zeros_like(self.hist_ref)
