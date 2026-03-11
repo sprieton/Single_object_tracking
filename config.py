@@ -37,7 +37,6 @@ speed_mcmc_factor = 0.5         # speed factor to the MCMC particle exploration
 t_df_max = 20       # df máximo
 t_df_min = 2        # df mínimo
 t_df_speed_factor = 5.0
-mcmc_expl_fact = 1.0            # exploration factor to the MCMC particle exploration
 
 # =============================================================================
 # 4. Reference Update (Appearance Model)
