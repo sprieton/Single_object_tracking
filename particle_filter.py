@@ -84,7 +84,6 @@ class particle_filter:
         self.t = step #Delay between frames for the state-transition matrix
         self.alpha = cfg.alpha #exponent to increase the sharpness of the particle weight distribution
         
-        
         #Set the initial state X_init=[xstatic,_xdynamic]
         xstatic=np.array(
             [bbox[0]+0.5*bbox[2],       # bb_center_x
@@ -147,7 +146,7 @@ class particle_filter:
         self.w=(1/self.N)*np.ones((self.N,));
         #Cumulative weights for particle resampling
         self.c=np.cumsum(self.w);
-        self.v_global = np.zeros(2)
+        self.vel_history = []       # save the velocities to make a mean
 
         #Vector with standard deviations of additive gaussian noise
         #Each dimension corresponds with one element in the state
@@ -158,7 +157,6 @@ class particle_filter:
 
 
     def update(self, im):
-        
         # Number of params in the state
         P = self.x.shape[1] 
         
@@ -169,7 +167,6 @@ class particle_filter:
         idx_particles = np.searchsorted(self.c, vals)
         # Get particle states
         x_past = self.x[idx_particles, :]
-        self.vel_history = []
         
         #####STEP 2: UPDATE THE PARTICLE STATE#######
         x_new = self.particle_update_(x_past, P, im.shape)
@@ -278,7 +275,7 @@ class particle_filter:
         if len(self.vel_history) > cfg.num_frames_vel:
             self.vel_history.pop(0)
 
-        # 4- Determine speed factor and adaptive t-Student degrees of freedom
+        # 4- Determine speed factor and adaptive t-Student degrees of freedom (variance of the t-Student)
         if len(self.vel_history) < cfg.num_frames_vel:
             speed_factor = 1.0
             df = cfg.t_df_max
@@ -297,7 +294,7 @@ class particle_filter:
 
         # 7- Scale noise along parallel and perpendicular directions
         scale_parallel = dinamic_noise[:2] * speed_factor
-        scale_perp = dinamic_noise[:2] * speed_factor * 0.3  # smaller lateral component
+        scale_perp = dinamic_noise[:2] * speed_factor * 0.5  # smaller lateral component
 
         # 8- Deform noise along motion direction
         noise_pos = (noise_base[:, 0][:, None] * vel_dir * scale_parallel) + \
@@ -313,48 +310,7 @@ class particle_filter:
         x_new[:, 4:] += noise_vel       # velocities
 
         return x_new
-        
-    def update_hist_ref(self, im_hsv, x_global, Neff, beta=0.1):
-        """
-        Updates the reference histogram based on the current estimated bbox (x_global)
-        and the reliability of the particle set (Neff).
-
-        Parameters
-        ----------
-        im_hsv : ndarray
-            Current image in HSV space (H and S channels).
-        x_global : array-like
-            State vector representing the estimated object [x, y, w, h, ...].
-        Neff : float
-            Effective number of particles (between 0 and 1).
-        beta : float
-            Base update rate (can be scaled by Neff).
-        """
-        # Reset reference if object is lost to avoid learning background
-        if Neff < cfg.lost_obj_Neff_th:
-            self.hist_ref = self.hist_init.copy()
-            return
-
-        # Extract histogram of the estimated bbox
-        hist_candidate = self.get_particle_hist_(x_global, im_hsv)
-
-        # Compute similarity with current reference
-        sim_global = self.get_Battacharyya_(hist_candidate)
-
-        # Update rate scales with Neff and similarity
-        update_rate = np.clip((Neff / cfg.dinamic_Neff_th) * 2*beta, 0, beta)
-
-        # Only update if similarity is reasonably high
-        if cfg.DEBUG:
-            print(f"sim of hist: {sim_global:.3f}", end=" | ")
-        if sim_global > cfg.hist_update_th:
-            if cfg.DEBUG:
-                print(f"updated {update_rate:.3f}%", end=" | ")
-            self.hist_ref = (1 - update_rate) * self.hist_ref + update_rate * hist_candidate
-            
-            # Anchor to initial histogram to prevent drifting
-            self.hist_ref = (1 - cfg.anchor_weight) * self.hist_ref + cfg.anchor_weight * self.hist_init
-            self.hist_ref /= self.hist_ref.sum() + 1e-10
+     
     
     def compute_deep_embedding_single_(self, patch):
         """Helper to compute embedding for a single patch (used for reference)"""
@@ -452,7 +408,7 @@ class particle_filter:
             speed = np.linalg.norm(x_new[i][4:6])
             scale = cfg.mcmc_expl_fact * (1 - w_norm) * (1 + cfg.speed_mcmc_factor * speed)
            
-            # 2- Create the proposal using the scales of ecploration
+            # 2- Create the proposal using the scales of exploration
             proposal = x_new[i].copy()
             noise = npr.randn(P) * scale * self.Sigma
 
@@ -477,16 +433,6 @@ class particle_filter:
             p_proposal_mean += p_proposal
             p_curr_mean += p_current
 
-            # 5- add Dynamic likelihood of proposal and original velocity
-            # vel_prop = proposal[4:6]
-            # vel_curr = x_new[i][4:6]
-
-            # motion_prop = np.exp(-0.5*np.sum((vel_prop-self.v_global)**2)/cfg.motion_sigma)
-            # motion_curr = np.exp(-0.5*np.sum((vel_curr-self.v_global)**2)/cfg.motion_sigma)
-
-            # p_proposal *= motion_prop
-            # p_current *= motion_curr
-
             # 6- Use Metropolis Hastings to update the particles proporsals
             # Accpetance ratio α = p(x′)/p(xt​) ​(Metropolis-Hastings)
             accept_ratio = min(1.0, p_proposal / (p_current + 1e-10))
@@ -499,15 +445,8 @@ class particle_filter:
                 x_new[i] = proposal # Accept the proposal
                 self.w[i] = p_proposal  
                 n_accepted += 1
-
             else:   # we keep the original particle
                 self.w[i] = p_current
-            # if npr.rand() <= accept_ratio:
-            #     x_new[i] = proposal  
-            #     self.w[i] = p_proposal
-            #     n_accepted += 1
-            # else: 
-            #     self.w[i] = p_current
 
         p_proposal_mean /= self.N
         p_curr_mean /= self.N

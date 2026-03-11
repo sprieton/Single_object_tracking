@@ -29,15 +29,15 @@ def parse_args():
                        type=int, default=300)
     
     # New arguments for parameter tuning
-    parser.add_argument('--sigma', nargs=8, type=float,
+    parser.add_argument('--noise_beta', type=float,
                         help='Standard deviation of noise for state vector [x,y,w,h,vx,vy,vw,vh]',
-                        default=cfg.std_noise)
-    parser.add_argument('--alpha', type=float,
+                        default=cfg.noise_beta)
+    parser.add_argument('--ellipse_area_ratio', type=float,
                         help='Exponent for Bhattacharyya similarity',
-                        default=cfg.alpha)
-    parser.add_argument('--speed_noise_factor', type=float,
+                        default=cfg.ellipse_area_ratio)
+    parser.add_argument('--mcmc_expl_fact', type=float,
                         help='Factor to scale positional noise with speed',
-                        default=cfg.speed_noise_factor)
+                        default=cfg.mcmc_expl_fact)
 
     args = parser.parse_args()
     return args
@@ -49,9 +49,9 @@ if __name__ == '__main__':
     print(args)
 
     # Override config values with command-line arguments
-    cfg.std_noise = np.array(args.sigma)
-    cfg.alpha = args.alpha
-    cfg.speed_noise_factor = args.speed_noise_factor
+    cfg.noise_beta = args.noise_beta
+    cfg.ellipse_area_ratio = args.ellipse_area_ratio
+    cfg.mcmc_expl_fact = args.mcmc_expl_fact
     
     videos={'Basketball','Biker','Bolt','Skating'};
     # videos={'Biker'}
