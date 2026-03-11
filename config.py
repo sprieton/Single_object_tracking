@@ -29,7 +29,14 @@ device = 'cuda'                 # 'cpu' or 'cuda'
 # =============================================================================
 dinamic_Neff_th = 0.3           # Value of Neff to apply dynamic noise 
 noise_beta = 2.0                # scale for Neff metric for noise adaptative funcion
+update_new_inf = 0.02           # Update a 2% of the old reference with the new mask
+speed_noise_factor = 0.5
+num_frames_vel=6                # number of frames to start to read velocity
 mcmc_expl_fact = 1.0            # exploration factor to the MCMC particle exploration
+speed_mcmc_factor = 0.5         # speed factor to the MCMC particle exploration
+t_df_max = 20       # df máximo
+t_df_min = 2        # df mínimo
+t_df_speed_factor = 5.0
 
 # =============================================================================
 # 4. Reference Update (Appearance Model)

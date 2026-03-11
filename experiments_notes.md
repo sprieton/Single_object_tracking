@@ -74,4 +74,13 @@ Base de Santi: Total average Results are JI=0.516555
 
 Histograma partido: Total average Results are JI=0.515722
 
-Vale ahora genera el plan para implementar que el objeto de referencia se vaya actualizando. 
+Vale ahora genera el plan para implementar que el objeto de referencia se vaya actualizando.
+
+## Comparision of results
+
+||  Approach                            |   Jakkard Index   |   max-time    |   max-time-video  ||
+||  Baseline                            |   0.502454        |   0.132458    |   Skating      ||
+||  Random_noise no linear velocity     |   0.366957        |   0.092872    |   Bolt      ||
+||  Linear vel add noise when Neff      |   0.517449        |   0.279883    |   Skating      ||
+||  Linear with MCMC update+Neff        |   0.513187        |   0.173892    |   Skating      ||
+||  T-student+MCMC+observation_elipse   |   0.530162        |   0.276627    |   Skating      ||
