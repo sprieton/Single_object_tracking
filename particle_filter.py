@@ -7,12 +7,21 @@ Created on Fri Mar 11 13:06:37 2022
 """
 
 import numpy as np
+import cv2
 from skimage.color import rgb2hsv
 import pdb
 import numpy.random as npr
+try:
+    import torch
+    import torchvision.transforms as transforms
+    from torchvision.models import mobilenet_v3_small, MobileNet_V3_Small_Weights
+    import torch.nn.functional as F
+    HAS_TORCH = True
+except (ImportError, RuntimeError):
+    HAS_TORCH = False
 import config as cfg
 
-def computeMultiChannelHistogram(im, K):
+def computeMultiChannelHistogram(im, K, mask=None):
     """
     Computes a normalized joint histogram for an image with a variable number of channels.
     Assumes that the input values of 'im' are normalized in the range [0.0, 1.0].
@@ -20,6 +29,7 @@ def computeMultiChannelHistogram(im, K):
     Parameters:
     - im: 3-dimensional NumPy array (Height, Width, Channels).
     - K: Number of bins per channel.
+    - mask: Optional 2D boolean/binary array. If provided, only pixels where mask > 0 are used.
     
     Returns:
     - hist: 1D vector containing the normalized joint histogram of size K^Channels.
@@ -31,7 +41,11 @@ def computeMultiChannelHistogram(im, K):
     h, w, c = im.shape
     
     # 1. Vectorize the image to have a list of pixels (H*W, C)
-    im_flat = np.reshape(im, (h * w, c))
+    if mask is not None:
+        # Use only pixels within the mask
+        im_flat = im[mask.astype(bool)]
+    else:
+        im_flat = np.reshape(im, (h * w, c))
     
     # 2. Quantize the values. 
     # Subtract 1e-30 to ensure the maximum value (1.0) falls into bin K-1 and doesn't go out of bounds.
@@ -41,7 +55,7 @@ def computeMultiChannelHistogram(im, K):
     r = np.clip(r, 0, K - 1)
     
     # 3. Compute the linear index for np.bincount (base K to base 10 conversion)
-    rlin = np.zeros(h * w, dtype=int)
+    rlin = np.zeros(im_flat.shape[0], dtype=int)
     for i in range(c):
         # The weight of each channel decreases from left to right (K^(c-1-i))
         rlin += r[:, i] * (K ** (c - 1 - i))
@@ -80,6 +94,7 @@ class particle_filter:
              ])
         xdynamic=np.zeros((4,))         # velocity_x, velocity_y, velocity_width, velocity_height
 
+
         # State-transition matrix
         self.x_init = np.concatenate((xstatic, xdynamic),axis=0)    # 8D
         self.A=np.block(
@@ -93,9 +108,38 @@ class particle_filter:
         # Compute the reference histogram => work in hsv space
         objim_hsv = rgb2hsv(objim)[:, :, :2]
 
-        #Compute the reference histogram => work in hsv space
-        self.hist_ref = computeMultiChannelHistogram(objim_hsv, self.K)  
+        # Compute descriptor using the configured strategy (Spatial or Ellipse)
+        self.hist_ref = self._compute_histogram_descriptor(objim_hsv)
+        self.hist_init = self.hist_ref.copy()
         
+        # Deep Learning Initialization
+        self.dl_ref = None
+        self.dl_model = None
+        self.transform = None
+        
+        if cfg.observation_model == 'deep_learning':
+            if not HAS_TORCH:
+                raise ImportError("PyTorch is required for deep_learning mode. Install it via pip.")
+            
+            # Load lightweight model
+            self.device = torch.device(cfg.device if torch.cuda.is_available() else 'cpu')
+            print(f"Deep Learning Model loaded on: {self.device}")
+            # Use MobileNetV3 Small - extremely fast
+            self.dl_model = mobilenet_v3_small(weights=MobileNet_V3_Small_Weights.DEFAULT).to(self.device)
+            self.dl_model.eval() # Set to evaluation mode
+            
+            # Preprocessing transforms
+            self.transform = transforms.Compose([
+                transforms.ToPILImage(),
+                transforms.Resize(cfg.dl_input_size),
+                transforms.ToTensor(),
+                transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+            ])
+            
+            # Compute reference embedding
+            # objim is RGB (from object_tracking.py)
+            self.dl_ref = self.compute_deep_embedding_single_(objim)
+
         #Copy the state to all particles x is NxP being N the number of particles and P the number of parameters 
         self.x=np.tile(self.x_init,(self.N,1));
 
@@ -131,9 +175,22 @@ class particle_filter:
         x_new = self.particle_update_(x_past, P, im.shape)
         
         ##### STEP 3: UPDATE THE WEIGHTS ########
-        self.v_global = np.average(self.x[:,4:6], axis=0, weights=self.w)   # update the velocity of the system
-        im_hsv = rgb2hsv(im)[:, :, :2]
-        self.weight_update_mcmc_(x_new, x_past, P, im_hsv)
+        if cfg.observation_model == 'deep_learning':
+            # For Deep Learning, we skip MCMC because running the network iteratively is too slow.
+            # We evaluate all particles in a BATCH.
+            
+            # 1. Compute Color Likelihoods (Fast)
+            im_hsv = rgb2hsv(im)[:, :, :2]
+            color_weights = self.compute_color_likelihoods_batch_(x_new, im_hsv)
+            
+            # 2. Compute Deep Learning Likelihoods (Batch Processing)
+            dl_weights = self.compute_deep_likelihoods_batch_(x_new, im)
+            
+            # 3. Combine
+            self.w = (1 - cfg.dl_weight) * color_weights + cfg.dl_weight * dl_weights
+        else:
+            im_hsv = rgb2hsv(im)[:, :, :2]
+            self.weight_update_mcmc_(x_new, P, im_hsv)
         
         ########### STEP 4: NORMALIZE WEIGHTS AND RECOMPUTE C ###########
         self.x = x_new
@@ -145,7 +202,7 @@ class particle_filter:
         Neff = 1.0 / np.sum(self.w**2) / self.N
 
         if cfg.prediction == 'weighted_avg':
-            frac_particles = np.clip(Neff / cfg.dinamic_Neff_th, 0.3, 1.0)
+            frac_particles = np.clip(Neff / cfg.dinamic_Neff_th, cfg.pred_min_frac, 1.0)
             if cfg.DEBUG:
                 print(f"avg of {frac_particles:.3f}%", end=" | ")
             n_use = max(1, int(self.N * frac_particles))
@@ -157,6 +214,20 @@ class particle_filter:
         elif cfg.prediction == 'max':
             idx_particle = np.argmax(self.w)
             x_global = self.x[idx_particle, ...]
+            
+        elif cfg.prediction == 'robust_mean':
+            # 1. Initial weighted estimate using all particles
+            x_mean = np.average(self.x, weights=self.w, axis=0)
+            
+            # 2. Filter spatial outliers (particles too far from the center)
+            # Threshold: half of the object diagonal
+            dists = np.linalg.norm(self.x[:, :2] - x_mean[:2], axis=1)
+            threshold = np.linalg.norm(x_mean[2:4]) * 0.5
+            mask = dists < threshold
+            
+            # 3. Recompute weighted average with inliers only
+            w_masked = self.w[mask] + 1e-30 # Avoid division by zero
+            x_global = np.average(self.x[mask], weights=w_masked, axis=0)
 
         # Update bbox from x_global
         self.bbox = np.array([
@@ -243,7 +314,122 @@ class particle_filter:
 
         return x_new
         
-    def weight_update_mcmc_(self, x_new, x_past, P, im_hsv):
+    def update_hist_ref(self, im_hsv, x_global, Neff, beta=0.1):
+        """
+        Updates the reference histogram based on the current estimated bbox (x_global)
+        and the reliability of the particle set (Neff).
+
+        Parameters
+        ----------
+        im_hsv : ndarray
+            Current image in HSV space (H and S channels).
+        x_global : array-like
+            State vector representing the estimated object [x, y, w, h, ...].
+        Neff : float
+            Effective number of particles (between 0 and 1).
+        beta : float
+            Base update rate (can be scaled by Neff).
+        """
+        # Reset reference if object is lost to avoid learning background
+        if Neff < cfg.lost_obj_Neff_th:
+            self.hist_ref = self.hist_init.copy()
+            return
+
+        # Extract histogram of the estimated bbox
+        hist_candidate = self.get_particle_hist_(x_global, im_hsv)
+
+        # Compute similarity with current reference
+        sim_global = self.get_Battacharyya_(hist_candidate)
+
+        # Update rate scales with Neff and similarity
+        update_rate = np.clip((Neff / cfg.dinamic_Neff_th) * 2*beta, 0, beta)
+
+        # Only update if similarity is reasonably high
+        if cfg.DEBUG:
+            print(f"sim of hist: {sim_global:.3f}", end=" | ")
+        if sim_global > cfg.hist_update_th:
+            if cfg.DEBUG:
+                print(f"updated {update_rate:.3f}%", end=" | ")
+            self.hist_ref = (1 - update_rate) * self.hist_ref + update_rate * hist_candidate
+            
+            # Anchor to initial histogram to prevent drifting
+            self.hist_ref = (1 - cfg.anchor_weight) * self.hist_ref + cfg.anchor_weight * self.hist_init
+            self.hist_ref /= self.hist_ref.sum() + 1e-10
+    
+    def compute_deep_embedding_single_(self, patch):
+        """Helper to compute embedding for a single patch (used for reference)"""
+        if patch.size == 0: return torch.zeros(1000).to(self.device)
+        tensor = self.transform(patch).unsqueeze(0).to(self.device)
+        with torch.no_grad():
+            embedding = self.dl_model(tensor)
+        return embedding # Shape (1, 1000)
+
+    def compute_deep_likelihoods_batch_(self, particles, im_rgb):
+        """
+        Extracts all particle patches, stacks them into a batch, and runs the CNN once.
+        """
+        height, width, _ = im_rgb.shape
+        batch_tensors = []
+        valid_indices = []
+        
+        # 1. Extract and Preprocess Patches
+        for i in range(self.N):
+            x, y, w, h = particles[i, :4]
+            
+            limy = np.clip([np.ceil(y - 0.5 * h), np.floor(y + 0.5 * h)], 0, height).astype(int)
+            limx = np.clip([np.ceil(x - 0.5 * w), np.floor(x + 0.5 * w)], 0, width).astype(int)
+            
+            patch = im_rgb[limy[0]:limy[1], limx[0]:limx[1], :]
+            
+            if patch.size > 0 and patch.shape[0] > 0 and patch.shape[1] > 0:
+                try:
+                    tensor = self.transform(patch)
+                    batch_tensors.append(tensor)
+                    valid_indices.append(i)
+                except Exception:
+                    pass # Skip malformed patches
+
+        if not batch_tensors:
+            return np.zeros(self.N)
+
+        # 2. Stack into a single tensor (Batch Size, 3, H, W)
+        batch_input = torch.stack(batch_tensors).to(self.device)
+        
+        # 3. Run Inference (One forward pass for N particles)
+        with torch.no_grad():
+            embeddings = self.dl_model(batch_input) # Shape (N_valid, 1000)
+        
+        # 4. Compute Cosine Similarity with Reference
+        # self.dl_ref is (1, 1000), embeddings is (N_valid, 1000)
+        # Cosine Sim = (A . B) / (|A|*|B|)
+        # F.cosine_similarity computes similarity along dim 1
+        sims = F.cosine_similarity(self.dl_ref, embeddings)
+        
+        # 5. Map back to weights array
+        weights = np.zeros(self.N)
+        sims_np = sims.cpu().numpy()
+        
+        # Clip negative similarities (DL embeddings can be orthogonal or opposite)
+        sims_np = np.clip(sims_np, 0, 1.0)
+        
+        # Apply exponent alpha to sharpen distribution (like in Bhattacharyya)
+        weights[valid_indices] = sims_np ** self.alpha
+        
+        return weights
+
+    def compute_color_likelihoods_batch_(self, particles, im_hsv):
+        """
+        Computes color histogram likelihoods for all particles without MCMC.
+        Used when DL mode is active.
+        """
+        weights = np.zeros(self.N)
+        for i in range(self.N):
+            hist = self.get_particle_hist_(particles[i], im_hsv)
+            sim = self.get_Battacharyya_(hist)
+            weights[i] = sim ** self.alpha
+        return weights
+
+    def weight_update_mcmc_(self, x_new, P, im_hsv):
         """
         Applies a Metropolis-Hastings MCMC move to refine particle states after
         propagation. Proposals are generated via Gaussian perturbations and
@@ -329,6 +515,37 @@ class particle_filter:
         if cfg.DEBUG:
             print(f"Accpeted: ({n_accepted}/{self.N})", end="")
     
+    def _compute_histogram_descriptor(self, patch_hsv):
+        """
+        Computes the histogram descriptor based on the configuration (Spatial Split or Ellipse).
+        Helper method to avoid code duplication.
+        """
+        h_c, w_c, _ = patch_hsv.shape
+
+        if cfg.observation_model == 'ellipse_hist':
+            # Calculate scaling factor to match the desired area ratio
+            # Area_ellipse = pi * (s*W/2) * (s*H/2) = s^2 * (pi/4) * Area_box
+            # We want Area_ellipse = ratio * Area_box
+            # s = 2 * sqrt(ratio / pi)
+            s = 2 * np.sqrt(cfg.ellipse_area_ratio / np.pi)
+            
+            center = (w_c // 2, h_c // 2)
+            axes = (int(s * w_c / 2), int(s * h_c / 2))
+            
+            mask_in = np.zeros((h_c, w_c), dtype=np.uint8)
+            cv2.ellipse(mask_in, center, axes, 0, 0, 360, 1, -1)
+            mask_out = 1 - mask_in
+            
+            hist_in = computeMultiChannelHistogram(patch_hsv, self.K, mask=mask_in)
+            hist_out = computeMultiChannelHistogram(patch_hsv, self.K, mask=mask_out)
+            return np.concatenate((hist_in, hist_out)) / 2.0
+        
+        else: # Default: 'spatial_hist' (Top / Bottom split)
+            h_half = h_c // 2
+            hist_top = computeMultiChannelHistogram(patch_hsv[:h_half, :, :], self.K)
+            hist_bottom = computeMultiChannelHistogram(patch_hsv[h_half:, :, :], self.K)
+            return np.concatenate((hist_top, hist_bottom)) / 2.0
+
     def get_particle_hist_(self, particle, im_hsv):
         """
         Extracts the image region defined by a particle bounding box and
@@ -367,7 +584,7 @@ class particle_filter:
             if candidate_reg.size == 0:
                 hist = np.zeros_like(self.hist_ref)
             else:
-                hist = computeMultiChannelHistogram(candidate_reg, self.K)
+                hist = self._compute_histogram_descriptor(candidate_reg)
 
         except Exception:
             hist = np.zeros_like(self.hist_ref)
