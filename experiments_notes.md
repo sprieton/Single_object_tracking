@@ -84,3 +84,18 @@ Vale ahora genera el plan para implementar que el objeto de referencia se vaya a
 ||  Linear vel add noise when Neff      |   0.517449        |   0.279883    |   Skating      ||
 ||  Linear with MCMC update+Neff        |   0.513187        |   0.173892    |   Skating      ||
 ||  T-student+MCMC+observation_elipse   |   0.530162        |   0.276627    |   Skating      ||
+
+# Particle Filter – Hyperparameter Cross Validation Summary
+
+### Grid search Results
+
+| sigma | alpha | speed_noise | JI | avg_time |
+|------|------|------|------|------|
+| `[0.2, 0.2, 0.01, 0.01, 0.01, 0.01, 0.001, 0.001]` | **20** | **0.4** | **0.539162** | **0.0786 s** |
+
+#### Descarted
+- `sigma_[x,y,w,h,vx,vy,vw,vh]` : 0.25, 0.30
+- `alpha` : 25, 30
+- `speed_noise_factor`: 0.5, 0.6
+
+Best result obtained:

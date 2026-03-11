@@ -1,32 +1,35 @@
 #!/bin/bash
 
-# Archivo donde se guardarán todos los resultados
-OUTPUT_FILE="parameter_sweep_results.txt"
-echo "=== Parameter Sweep Results ===" > $OUTPUT_FILE
-echo "sigma_x sigma_y sigma_w sigma_h sigma_vx sigma_vy sigma_vw sigma_vh alpha speed_noise_factor JI avg_time_per_frame" >> $OUTPUT_FILE
+# Archivo de salida CSV
+OUTPUT_FILE="parameter_sweep_results.csv"
+echo "noise_beta,ellipse_area_ratio,mcmc_expl_fact,JI,avg_time_per_frame" > $OUTPUT_FILE
 
-# Definir arrays con valores a probar
-SIGMA_VALUES=("0.25 0.25 0.01 0.01 0.01 0.01 0.001 0.001" "0.3 0.3 0.02 0.02 0.01 0.01 0.001 0.001" "0.2 0.2 0.01 0.01 0.01 0.01 0.001 0.001")
-ALPHA_VALUES=(15 20 25)
-SPEED_NOISE_VALUES=(0.4 0.5 0.6)
+# Valores a probar
+NOISE_BETA=(1.5 1.55 1.45)
+ELIPSE_RATIO=(0.5)
+
+MCMC_FACT=(1.2 1.3)
 
 # Número de partículas y repeticiones
-N_PARTICLES=300
-REPETITIONS=4
+N_PARTICLES=100
+REPETITIONS=2
 
 # Loop sobre todas las combinaciones
-for sigma in "${SIGMA_VALUES[@]}"; do
-    for alpha in "${ALPHA_VALUES[@]}"; do
-        for speed_noise in "${SPEED_NOISE_VALUES[@]}"; do
-            echo "Running with sigma=$sigma alpha=$alpha speed_noise_factor=$speed_noise"
-            
-            # Ejecutar el script de evaluación y capturar la última línea con el JI promedio
-            RESULT=$(python3 evaluateSystem.py --N $N_PARTICLES --repetitions $REPETITIONS \
-                     --sigma $sigma --alpha $alpha --speed_noise_factor $speed_noise | \
-                     tail -n 3 | head -n 1)
+for noise_beta in "${NOISE_BETA[@]}"; do
+    for ellipse_area_ratio in "${ELIPSE_RATIO[@]}"; do
+        for mcmc_expl_fact in "${MCMC_FACT[@]}"; do
+            echo "Running with noise_beta=$noise_beta ellipse_area_ratio=$ellipse_area_ratio mcmc_expl_fact=$mcmc_expl_fact"
 
-            # Guardar los parámetros y el resultado en el fichero
-            echo "$sigma $alpha $speed_noise $RESULT" >> $OUTPUT_FILE
+            # Ejecutar el script de evaluación
+            OUTPUT=$(python3 evaluateSystem.py --N $N_PARTICLES --repetitions $REPETITIONS \
+                     --noise_beta $noise_beta --ellipse_area_ratio $ellipse_area_ratio --mcmc_expl_fact $mcmc_expl_fact)
+
+            # Extraer el JI promedio final y avg_time_per_frame
+            JI=$(echo "$OUTPUT" | grep "Total average Results are JI=" | awk -F'=' '{print $2}' | tr -d ' ')
+            AVG_TIME=$(echo "$OUTPUT" | grep "Results for video" | tail -n4 | awk -F'=' '{sum += $3} END {print sum/NR}')
+
+            # Guardar en CSV
+            echo "$noise_beta,$ellipse_area_ratio,$mcmc_expl_fact,$JI,$AVG_TIME" >> $OUTPUT_FILE
         done
     done
 done

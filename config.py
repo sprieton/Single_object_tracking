@@ -9,9 +9,9 @@ Created on Fri Mar 11 15:20:50 2022
 # =============================================================================
 # 1. General & State Initialization
 # =============================================================================
-std_noise=[0.25, 0.25, 0.01, 0.01, 1e-2, 1e-2, 1e-3, 1e-3] # Original, more precise noise
+std_noise=[0.21, 0.21, 0.01, 0.01, 1e-2, 1e-2, 1e-3, 1e-3] # Original, more precise noise
 K=32                            # K is the number of bins for each dimension in the HS histogram
-prediction = 'weighted_avg'     # Options: 'max', 'weighted_avg', 'robust_mean'
+prediction = 'robust_mean'     # Options: 'max', 'weighted_avg', 'robust_mean'
 pred_min_frac = 0.3             # Min fraction of particles used in weighted_avg (0.0 to 1.0)
 
 # =============================================================================
@@ -27,12 +27,12 @@ device = 'cuda'                 # 'cpu' or 'cuda'
 # =============================================================================
 # 3. Adaptive Noise & MCMC
 # =============================================================================
-dinamic_Neff_th = 0.3           # Value of Neff to apply dynamic noise 
-noise_beta = 2.0                # scale for Neff metric for noise adaptative funcion
+dinamic_Neff_th = 0.35          # Value of Neff to apply dynamic noise 
+noise_beta = 1.45                # scale for Neff metric for noise adaptative funcion
 update_new_inf = 0.02           # Update a 2% of the old reference with the new mask
-speed_noise_factor = 0.5
-num_frames_vel=6                # number of frames to start to read velocity
-mcmc_expl_fact = 1.0            # exploration factor to the MCMC particle exploration
+speed_noise_factor = 0.25        # scale of importance of the speed
+num_frames_vel=4                # number of frames to start to read velocity
+mcmc_expl_fact = 1.3            # exploration factor to the MCMC particle exploration
 speed_mcmc_factor = 0.5         # speed factor to the MCMC particle exploration
 t_df_max = 20       # df máximo
 t_df_min = 2        # df mínimo
