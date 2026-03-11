@@ -18,7 +18,8 @@ pred_min_frac = 0.3             # Min fraction of particles used in weighted_avg
 # 2. Observation Model
 # =============================================================================
 alpha = 20.0                    # Original, balanced sharpness
-observation_model = 'deep_learning' # Options: 'spatial_hist' (default), 'deep_learning'
+observation_model = 'ellipse_hist' # Options: 'spatial_hist' (default), 'ellipse_hist', 'deep_learning'
+ellipse_area_ratio = 0.5        # Fraction of the bbox area for the ellipse (0.5 = 50% inner, 50% outer)
 dl_input_size = (64, 64)        # Input size for the neural network (smaller = faster)
 dl_weight = 0.5                 # Weight of Deep Learning vs Color Histogram (0.5 = 50% each)
 device = 'cuda'                 # 'cpu' or 'cuda'

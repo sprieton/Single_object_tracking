@@ -7,6 +7,7 @@ Created on Fri Mar 11 13:06:37 2022
 """
 
 import numpy as np
+import cv2
 from skimage.color import rgb2hsv
 import pdb
 import numpy.random as npr
@@ -20,7 +21,7 @@ except (ImportError, RuntimeError):
     HAS_TORCH = False
 import config as cfg
 
-def computeMultiChannelHistogram(im, K):
+def computeMultiChannelHistogram(im, K, mask=None):
     """
     Computes a normalized joint histogram for an image with a variable number of channels.
     Assumes that the input values of 'im' are normalized in the range [0.0, 1.0].
@@ -28,6 +29,7 @@ def computeMultiChannelHistogram(im, K):
     Parameters:
     - im: 3-dimensional NumPy array (Height, Width, Channels).
     - K: Number of bins per channel.
+    - mask: Optional 2D boolean/binary array. If provided, only pixels where mask > 0 are used.
     
     Returns:
     - hist: 1D vector containing the normalized joint histogram of size K^Channels.
@@ -39,7 +41,11 @@ def computeMultiChannelHistogram(im, K):
     h, w, c = im.shape
     
     # 1. Vectorize the image to have a list of pixels (H*W, C)
-    im_flat = np.reshape(im, (h * w, c))
+    if mask is not None:
+        # Use only pixels within the mask
+        im_flat = im[mask.astype(bool)]
+    else:
+        im_flat = np.reshape(im, (h * w, c))
     
     # 2. Quantize the values. 
     # Subtract 1e-30 to ensure the maximum value (1.0) falls into bin K-1 and doesn't go out of bounds.
@@ -49,7 +55,7 @@ def computeMultiChannelHistogram(im, K):
     r = np.clip(r, 0, K - 1)
     
     # 3. Compute the linear index for np.bincount (base K to base 10 conversion)
-    rlin = np.zeros(h * w, dtype=int)
+    rlin = np.zeros(im_flat.shape[0], dtype=int)
     for i in range(c):
         # The weight of each channel decreases from left to right (K^(c-1-i))
         rlin += r[:, i] * (K ** (c - 1 - i))
@@ -88,6 +94,7 @@ class particle_filter:
              ])
         xdynamic=np.zeros((4,))         # velocity_x, velocity_y, velocity_width, velocity_height
 
+
         # State-transition matrix
         self.x_init = np.concatenate((xstatic, xdynamic),axis=0)    # 8D
         self.A=np.block(
@@ -101,13 +108,8 @@ class particle_filter:
         # Compute the reference histogram => work in hsv space
         objim_hsv = rgb2hsv(objim)[:, :, :2]
 
-        #Compute the reference histogram => work in hsv space
-        # Spatial Histogram: Split into Top and Bottom
-        h_obj, _, _ = objim_hsv.shape
-        h_half = h_obj // 2
-        hist_top = computeMultiChannelHistogram(objim_hsv[:h_half, :, :], self.K)
-        hist_bottom = computeMultiChannelHistogram(objim_hsv[h_half:, :, :], self.K)
-        self.hist_ref = np.concatenate((hist_top, hist_bottom)) / 2.0
+        # Compute descriptor using the configured strategy (Spatial or Ellipse)
+        self.hist_ref = self._compute_histogram_descriptor(objim_hsv)
         self.hist_init = self.hist_ref.copy()
         
         # Deep Learning Initialization
@@ -455,6 +457,37 @@ class particle_filter:
         if cfg.DEBUG:
             print(f"Accpeted: ({n_accpeted}/{self.N})", end="")
     
+    def _compute_histogram_descriptor(self, patch_hsv):
+        """
+        Computes the histogram descriptor based on the configuration (Spatial Split or Ellipse).
+        Helper method to avoid code duplication.
+        """
+        h_c, w_c, _ = patch_hsv.shape
+
+        if cfg.observation_model == 'ellipse_hist':
+            # Calculate scaling factor to match the desired area ratio
+            # Area_ellipse = pi * (s*W/2) * (s*H/2) = s^2 * (pi/4) * Area_box
+            # We want Area_ellipse = ratio * Area_box
+            # s = 2 * sqrt(ratio / pi)
+            s = 2 * np.sqrt(cfg.ellipse_area_ratio / np.pi)
+            
+            center = (w_c // 2, h_c // 2)
+            axes = (int(s * w_c / 2), int(s * h_c / 2))
+            
+            mask_in = np.zeros((h_c, w_c), dtype=np.uint8)
+            cv2.ellipse(mask_in, center, axes, 0, 0, 360, 1, -1)
+            mask_out = 1 - mask_in
+            
+            hist_in = computeMultiChannelHistogram(patch_hsv, self.K, mask=mask_in)
+            hist_out = computeMultiChannelHistogram(patch_hsv, self.K, mask=mask_out)
+            return np.concatenate((hist_in, hist_out)) / 2.0
+        
+        else: # Default: 'spatial_hist' (Top / Bottom split)
+            h_half = h_c // 2
+            hist_top = computeMultiChannelHistogram(patch_hsv[:h_half, :, :], self.K)
+            hist_bottom = computeMultiChannelHistogram(patch_hsv[h_half:, :, :], self.K)
+            return np.concatenate((hist_top, hist_bottom)) / 2.0
+
     def get_particle_hist_(self, particle, im_hsv):
         """
         Extracts the image region defined by a particle bounding box and
@@ -493,12 +526,7 @@ class particle_filter:
             if candidate_reg.size == 0:
                 hist = np.zeros_like(self.hist_ref)
             else:
-                # Spatial Histogram: Split into Top and Bottom
-                h_c, _, _ = candidate_reg.shape
-                h_half = h_c // 2
-                hist_top = computeMultiChannelHistogram(candidate_reg[:h_half, :, :], self.K)
-                hist_bottom = computeMultiChannelHistogram(candidate_reg[h_half:, :, :], self.K)
-                hist = np.concatenate((hist_top, hist_bottom)) / 2.0
+                hist = self._compute_histogram_descriptor(candidate_reg)
 
         except Exception:
             hist = np.zeros_like(self.hist_ref)
