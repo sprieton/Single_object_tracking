@@ -9,7 +9,6 @@ import numpy as np
 from skimage.color import gray2rgb
 from skimage.util import img_as_ubyte
 import cv2
-import pdb
 
 def showBB(im, bbs):
     if im.ndim == 2:

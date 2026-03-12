@@ -8,12 +8,10 @@ Created on Fri Mar 11 16:12:37 2022
 
 import numpy as np
 import argparse
-import sys
 import os
 from object_tracking import object_tracking
 from multiprocessing import Pool
 from functools import partial
-import pdb
 import config as cfg
 
 def parse_args():
@@ -53,8 +51,7 @@ if __name__ == '__main__':
     cfg.ellipse_area_ratio = args.ellipse_area_ratio
     cfg.mcmc_expl_fact = args.mcmc_expl_fact
     
-    videos={'Basketball','Biker','Bolt','Skating'};
-    # videos={'Biker'}
+    videos={'Basketball','Biker','Bolt','Skating'}
     #As the particle filtering is stichastic, several repetitions will provide
     #different values. we compute several and average to get more stable
     #results.

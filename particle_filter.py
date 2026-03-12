@@ -9,7 +9,6 @@ Created on Fri Mar 11 13:06:37 2022
 import numpy as np
 import cv2
 from skimage.color import rgb2hsv
-import pdb
 import numpy.random as npr
 try:
     import torch
@@ -109,7 +108,6 @@ class particle_filter:
 
         # Compute descriptor using the configured strategy (Spatial or Ellipse)
         self.hist_ref = self._compute_histogram_descriptor(objim_hsv)
-        self.hist_init = self.hist_ref.copy()
         
         # Deep Learning Initialization
         self.dl_ref = None

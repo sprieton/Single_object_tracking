@@ -6,7 +6,6 @@ Created on Fri Mar 11 16:04:29 2022
 @author: ivan
 """
 import numpy as np
-import pdb
 
 def computeJI(gtbox, predbox):
     # Calculate right and bottom edges WITHOUT modifying the original arrays

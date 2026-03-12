@@ -29,7 +29,6 @@ device = 'cuda'                 # 'cpu' or 'cuda'
 # =============================================================================
 dinamic_Neff_th = 0.35          # Value of Neff to apply dynamic noise 
 noise_beta = 1.45                # scale for Neff metric for noise adaptative funcion
-update_new_inf = 0.02           # Update a 2% of the old reference with the new mask
 speed_noise_factor = 0.25        # scale of importance of the speed
 num_frames_vel=4                # number of frames to start to read velocity
 mcmc_expl_fact = 1.3            # exploration factor to the MCMC particle exploration
@@ -37,19 +36,6 @@ speed_mcmc_factor = 0.5         # speed factor to the MCMC particle exploration
 t_df_max = 20       # df máximo
 t_df_min = 2        # df mínimo
 t_df_speed_factor = 5.0
-
-# =============================================================================
-# 4. Reference Update (Appearance Model)
-# =============================================================================
-update_new_inf = 0.02           # Base update rate (beta) for the reference histogram
-hist_update_th = 1.1            # Set > 1.0 to disable histogram updates (Static Model)
-anchor_weight = 0.0             # Not used
-
-# =============================================================================
-# 5. Recovery / Lost Object Strategy
-# =============================================================================
-lost_obj_Neff_th = 0.00         # Disable recovery to maximize precision (Best Results state)
-lost_obj_part_restart = 0.1     # Percentage of particles to restart/randomize when object is lost
 
 # =============================================================================
 # 6. Debugging

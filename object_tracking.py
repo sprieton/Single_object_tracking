@@ -11,7 +11,6 @@ import cv2
 import argparse
 import sys
 import matplotlib.pyplot as plt
-import pdb
 from scipy.io import loadmat
 from particle_filter import particle_filter
 from visualization import showBB, showParticles
@@ -83,7 +82,6 @@ def object_tracking(video, N, VERBOSE, seed=1):
             #Show the particles
             im=showParticles(im,tracker.x);
             cv2.imshow('Tracking', im[:,:,::-1])
-            # cv2.waitKey(0)
             if cv2.waitKey(1) & 0xFF == ord('q'):
                 break
         #Compute the Jacard-Index
